@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { z } from "zod";
 import { useAuth } from "@/lib/auth-context";
-import { USERS } from "@/lib/mock-data";
+import { useData } from "@/lib/data-context";
 
 const loginSchema = z.object({
   email: z.string().min(1, "Email wajib diisi").email("Format email tidak valid"),
@@ -13,8 +13,11 @@ const loginSchema = z.object({
 
 type FieldErrors = Partial<Record<"email" | "password", string>>;
 
+const DEMO_ROLE_ORDER = ["Engineer", "Coordinator", "Management", "Admin"] as const;
+
 export default function LoginPage() {
   const { login, user, isLoading } = useAuth();
+  const { users } = useData();
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -118,7 +121,9 @@ export default function LoginPage() {
         <div className="mt-6 rounded-2xl border border-zinc-200 bg-white p-4 text-xs text-zinc-500">
           <p className="mb-2 font-medium text-zinc-700">Akun demo (password bebas, min. 4 karakter):</p>
           <ul className="space-y-1">
-            {USERS.slice(0, 4).map((u) => (
+            {DEMO_ROLE_ORDER.map((role) => users.find((u) => u.peran === role && u.isActive))
+              .filter((u): u is NonNullable<typeof u> => Boolean(u))
+              .map((u) => (
               <li key={u.id} className="flex items-center justify-between">
                 <span>{u.peran}</span>
                 <button

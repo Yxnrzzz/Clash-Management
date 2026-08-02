@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
-import { PROJECT } from "@/lib/mock-data";
+import { useData } from "@/lib/data-context";
 
 const ROLE_LABEL: Record<string, string> = {
   Engineer: "Field / Design Engineer",
@@ -14,6 +14,7 @@ const ROLE_LABEL: Record<string, string> = {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
+  const { project } = useData();
   const pathname = usePathname();
   const router = useRouter();
 
@@ -26,7 +27,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     { href: "/register", label: "Clash Register", show: true },
     { href: "/clashes/new", label: "Input Clash Baru", show: user.peran !== "Management" },
     { href: "/my-clashes", label: "Clash Saya", show: user.peran === "Engineer" || user.peran === "Coordinator" },
+    { href: "/import", label: "Import Clash", show: user.peran === "Coordinator" || user.peran === "Admin" },
   ].filter((i) => i.show);
+
+  const adminItems = [
+    { href: "/admin/users", label: "User" },
+    { href: "/admin/projects", label: "Proyek" },
+    { href: "/admin/master-data", label: "Master Data" },
+  ];
 
   return (
     <div className="flex min-h-screen w-full bg-zinc-50 text-zinc-900">
@@ -37,10 +45,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
           <div>
             <p className="text-sm font-semibold leading-none">ClashHub</p>
-            <p className="text-xs text-zinc-500">{PROJECT.nama}</p>
+            <p className="text-xs text-zinc-500">{project.nama}</p>
           </div>
         </div>
-        <nav className="flex-1 space-y-1 px-3 py-4">
+        <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
           {navItems.map((item) => {
             const active = pathname === item.href || pathname.startsWith(item.href + "/");
             return (
@@ -57,6 +65,43 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </Link>
             );
           })}
+
+          {user.peran === "Admin" && (
+            <div className="pt-4">
+              <p className="px-3 pb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                Administrasi
+              </p>
+              {adminItems.map((item) => {
+                const active = pathname === item.href || pathname.startsWith(item.href + "/");
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={`block rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                      active
+                        ? "bg-zinc-900 text-white"
+                        : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
+                    }`}
+                  >
+                    {item.label}
+                  </Link>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="pt-4">
+            <Link
+              href="/settings/notifications"
+              className={`block rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                pathname.startsWith("/settings")
+                  ? "bg-zinc-900 text-white"
+                  : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
+              }`}
+            >
+              Pengaturan Notifikasi
+            </Link>
+          </div>
         </nav>
         <div className="border-t border-zinc-200 p-3">
           <div className="rounded-lg bg-zinc-50 px-3 py-2">

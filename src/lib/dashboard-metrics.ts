@@ -1,6 +1,4 @@
-import { DISCIPLINES, PRIORITIES, ZONES } from "./mock-data";
-import { isOverdue, statusById } from "./lookup";
-import type { Clash } from "./types";
+import type { Clash, Discipline, Priority, Status, Zone } from "./types";
 
 export interface Slice {
   id: string;
@@ -83,9 +81,17 @@ function countBy(clashes: Clash[], key: keyof Clash, source: { id: string; label
   return source.map((s) => ({ id: s.id, label: s.label, value: counts.get(s.id) ?? 0 }));
 }
 
+export interface MasterDataForMetrics {
+  statuses: Status[];
+  disciplines: Discipline[];
+  priorities: Priority[];
+  zones: Zone[];
+}
+
 export function computeMetrics(
   allClashes: Clash[],
-  range: { start: Date | null; end: Date }
+  range: { start: Date | null; end: Date },
+  masterData: MasterDataForMetrics
 ): DashboardMetrics {
   const clashes = allClashes.filter((c) => {
     const created = new Date(c.createdAt);
@@ -93,15 +99,20 @@ export function computeMetrics(
     return created <= range.end;
   });
 
+  const statusMap = new Map(masterData.statuses.map((s) => [s.id, s]));
+  const now = Date.now();
+
   let closedCount = 0;
   let overdueCount = 0;
   let resolutionMsTotal = 0;
   let resolvedForMttr = 0;
 
   for (const c of clashes) {
-    const closed = statusById(c.statusId)?.isClosedState ?? false;
+    const status = statusMap.get(c.statusId);
+    const closed = status?.isClosedState ?? false;
     if (closed) closedCount++;
-    if (isOverdue(c)) overdueCount++;
+    const overdue = !closed && Boolean(c.dueDate) && new Date(c.dueDate as string).getTime() < now;
+    if (overdue) overdueCount++;
     if (closed && c.closedAt) {
       resolutionMsTotal += new Date(c.closedAt).getTime() - new Date(c.createdAt).getTime();
       resolvedForMttr++;
@@ -149,17 +160,19 @@ export function computeMetrics(
     byDiscipline: countBy(
       clashes,
       "disciplineId",
-      DISCIPLINES.map((d) => ({ id: d.id, label: d.kode }))
+      masterData.disciplines.map((d) => ({ id: d.id, label: d.kode }))
     ),
     byPriority: countBy(
       clashes,
       "priorityId",
-      PRIORITIES.map((p) => ({ id: p.id, label: p.nama }))
+      // Sorted by weight so the ordinal color ramp (light -> dark) always
+      // lines up with Low -> Critical, even if an admin adds a priority.
+      [...masterData.priorities].sort((a, b) => a.bobot - b.bobot).map((p) => ({ id: p.id, label: p.nama }))
     ),
     byZone: countBy(
       clashes,
       "zoneId",
-      ZONES.map((z) => ({ id: z.id, label: `${z.level} · ${z.nama}` }))
+      masterData.zones.map((z) => ({ id: z.id, label: `${z.level} · ${z.nama}` }))
     ),
   };
 }

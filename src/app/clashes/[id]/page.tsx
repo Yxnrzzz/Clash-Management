@@ -4,20 +4,8 @@ import { use, useState } from "react";
 import Link from "next/link";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
-import { PRIORITIES, PROJECT, STATUSES, USERS } from "@/lib/mock-data";
-import {
-  allowedStatusTransitions,
-  canComment,
-  canEditClash,
-  disciplineById,
-  formatBytes,
-  formatDateTime,
-  isOverdue,
-  priorityById,
-  statusById,
-  userById,
-  zoneById,
-} from "@/lib/lookup";
+import { useMasterDataLookups } from "@/lib/use-master-data";
+import { canComment, canEditClash, formatBytes, formatDateTime } from "@/lib/lookup";
 import { PriorityBadge, StatusBadge, OverdueBadge } from "@/components/Badge";
 
 type Tab = "lampiran" | "komentar" | "riwayat";
@@ -25,7 +13,22 @@ type Tab = "lampiran" | "komentar" | "riwayat";
 export default function ClashDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const { user, isLoading } = useRequireAuth();
-  const { clashes, comments, auditLogs, attachments, updateClashField, addComment } = useData();
+  const {
+    clashes,
+    comments,
+    auditLogs,
+    attachments,
+    attachmentPreviewUrls,
+    project,
+    users,
+    updateClashField,
+    addComment,
+  } = useData();
+  const { priorities, disciplineById, zoneById, statusById, priorityById, userById, isOverdue, allowedStatusTransitions } =
+    useMasterDataLookups();
+  const assignableUsers = users.filter(
+    (u) => u.isActive && (u.peran === "Engineer" || u.peran === "Coordinator")
+  );
   const [tab, setTab] = useState<Tab>("lampiran");
   const [commentText, setCommentText] = useState("");
 
@@ -84,7 +87,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
           </div>
           <h1 className="mt-1 text-2xl font-semibold text-zinc-900">{clash.judul}</h1>
           <p className="mt-1 text-sm text-zinc-500">
-            {PROJECT.nama} · Dilaporkan oleh {userById(clash.reporterId)?.nama} pada{" "}
+            {project.nama} · Dilaporkan oleh {userById(clash.reporterId)?.nama} pada{" "}
             {formatDateTime(clash.createdAt)}
           </p>
         </div>
@@ -129,22 +132,44 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                     <p className="text-sm text-zinc-400">Belum ada lampiran.</p>
                   ) : (
                     <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      {clashAttachments.map((a) => (
-                        <li
-                          key={a.id}
-                          className="flex items-center gap-3 rounded-lg border border-zinc-200 p-3"
-                        >
-                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-xs font-semibold uppercase text-zinc-500">
-                            {a.tipe}
-                          </div>
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-medium text-zinc-700">{a.namaFile}</p>
-                            <p className="text-xs text-zinc-400">
-                              {formatBytes(a.ukuranBytes)} · diunggah oleh {userById(a.uploadedBy)?.nama}
-                            </p>
-                          </div>
-                        </li>
-                      ))}
+                      {clashAttachments.map((a) => {
+                        const previewUrl = attachmentPreviewUrls[a.id];
+                        return (
+                          <li
+                            key={a.id}
+                            className="flex items-center gap-3 rounded-lg border border-zinc-200 p-3"
+                          >
+                            {previewUrl && a.tipe === "image" ? (
+                              // eslint-disable-next-line @next/next/no-img-element -- object URL, next/image can't optimize blob: sources
+                              <img
+                                src={previewUrl}
+                                alt={a.namaFile}
+                                className="h-10 w-10 shrink-0 rounded-lg object-cover"
+                              />
+                            ) : (
+                              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-xs font-semibold uppercase text-zinc-500">
+                                {a.tipe}
+                              </div>
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-sm font-medium text-zinc-700">{a.namaFile}</p>
+                              <p className="text-xs text-zinc-400">
+                                {formatBytes(a.ukuranBytes)} · diunggah oleh {userById(a.uploadedBy)?.nama}
+                                {!previewUrl && " · pratinjau tidak tersedia setelah reload"}
+                              </p>
+                            </div>
+                            {previewUrl && (
+                              <a
+                                href={previewUrl}
+                                download={a.namaFile}
+                                className="shrink-0 text-xs font-medium text-zinc-500 hover:text-zinc-900 hover:underline"
+                              >
+                                Unduh
+                              </a>
+                            )}
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </>
@@ -244,7 +269,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                       .filter((id) => id !== clash.statusId)
                       .map((id) => (
                         <option key={id} value={id}>
-                          {STATUSES.find((s) => s.id === id)?.nama}
+                          {statusById(id)?.nama}
                         </option>
                       ))}
                   </select>
@@ -263,7 +288,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                     onChange={(e) => updateClashField(clash.id, "priorityId", e.target.value, user.id)}
                     className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-sm"
                   >
-                    {PRIORITIES.map((p) => (
+                    {priorities.filter((p) => p.isActive).map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.nama}
                       </option>
@@ -287,7 +312,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                     className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-sm"
                   >
                     <option value="">Belum ditugaskan</option>
-                    {USERS.filter((u) => u.peran === "Engineer" || u.peran === "Coordinator").map((u) => (
+                    {assignableUsers.map((u) => (
                       <option key={u.id} value={u.id}>
                         {u.nama}
                       </option>

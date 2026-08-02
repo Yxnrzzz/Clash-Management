@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { z } from "zod";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
-import { DISCIPLINES, PRIORITIES, ZONES } from "@/lib/mock-data";
 import { formatBytes } from "@/lib/lookup";
 
 const MAX_FILE_MB = 10;
@@ -31,7 +30,10 @@ interface PendingFile {
 
 export default function NewClashPage() {
   const { user, isLoading } = useRequireAuth();
-  const { createClash } = useData();
+  const { createClash, disciplines, zones, priorities } = useData();
+  const activeDisciplines = disciplines.filter((d) => d.isActive);
+  const activeZones = zones.filter((z) => z.isActive);
+  const activePriorities = priorities.filter((p) => p.isActive);
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -116,6 +118,7 @@ export default function NewClashPage() {
           namaFile: f.file.name,
           tipe: f.file.type === "application/pdf" ? "pdf" : "image",
           ukuranBytes: f.file.size,
+          file: f.file,
         })),
       },
       reporterId
@@ -190,7 +193,7 @@ export default function NewClashPage() {
               }`}
             >
               <option value="">Pilih disiplin</option>
-              {DISCIPLINES.map((d) => (
+              {activeDisciplines.map((d) => (
                 <option key={d.id} value={d.id}>
                   {d.kode} — {d.nama}
                 </option>
@@ -209,7 +212,7 @@ export default function NewClashPage() {
               }`}
             >
               <option value="">Pilih zona</option>
-              {ZONES.map((z) => (
+              {activeZones.map((z) => (
                 <option key={z.id} value={z.id}>
                   {z.level} · {z.nama}
                 </option>
@@ -228,7 +231,7 @@ export default function NewClashPage() {
               }`}
             >
               <option value="">Pilih prioritas</option>
-              {PRIORITIES.map((p) => (
+              {activePriorities.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.nama}
                 </option>

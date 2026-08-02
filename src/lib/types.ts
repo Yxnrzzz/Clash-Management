@@ -18,35 +18,42 @@ export interface Discipline {
   id: string;
   kode: string;
   nama: string;
+  isActive: boolean;
 }
 
 export interface Zone {
   id: string;
   nama: string;
   level: string;
+  isActive: boolean;
 }
 
 export interface Status {
   id: string;
-  nama: "Open" | "In Progress" | "Resolved" | "Closed";
+  nama: string;
   urutan: number;
   isClosedState: boolean;
 }
 
 export interface Priority {
   id: string;
-  nama: "Low" | "Medium" | "High" | "Critical";
+  nama: string;
   bobot: number;
+  isActive: boolean;
 }
 
 export interface Attachment {
   id: string;
   clashId: string;
   namaFile: string;
-  tipe: "image" | "pdf";
+  tipe: "image" | "pdf" | "other";
   ukuranBytes: number;
   uploadedBy: string;
   createdAt: string;
+  /** Object URL for this session only — attachments are not persisted to
+   * localStorage (no backend/object storage exists), so the file itself does
+   * not survive a page reload. See data-context.tsx for the in-memory store. */
+  objectUrl?: string;
 }
 
 export interface Comment {
@@ -92,5 +99,12 @@ export interface NewClashInput {
   priorityId: string;
   deskripsi: string;
   dueDate?: string;
-  attachments: { namaFile: string; tipe: "image" | "pdf"; ukuranBytes: number }[];
+  attachments: { namaFile: string; tipe: "image" | "pdf" | "other"; ukuranBytes: number; file?: File }[];
+}
+
+export interface NotificationPreference {
+  userId: string;
+  emailEnabled: boolean;
+  whatsappEnabled: boolean;
+  whatsappNumber: string;
 }

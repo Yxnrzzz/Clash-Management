@@ -4,14 +4,8 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
-import {
-  disciplineById,
-  formatDate,
-  isOverdue,
-  priorityById,
-  statusById,
-  zoneById,
-} from "@/lib/lookup";
+import { useMasterDataLookups } from "@/lib/use-master-data";
+import { formatDate } from "@/lib/lookup";
 import { PriorityBadge, StatusBadge, OverdueBadge } from "@/components/Badge";
 
 type Scope = "reported" | "assigned";
@@ -19,6 +13,7 @@ type Scope = "reported" | "assigned";
 export default function MyClashesPage() {
   const { user, isLoading } = useRequireAuth();
   const { clashes } = useData();
+  const { disciplineById, zoneById, statusById, priorityById, isOverdue } = useMasterDataLookups();
   const [scope, setScope] = useState<Scope>("reported");
 
   const list = useMemo(() => {

@@ -11,13 +11,21 @@ import type {
   Zone,
 } from "./types";
 
-export const PROJECT: Project = {
+/**
+ * These INITIAL_* constants seed the mutable, localStorage-persisted state in
+ * data-context.tsx. Once the app boots, master data (users, disciplines,
+ * zones, statuses, priorities, project) lives in context and can be edited
+ * via the Admin pages — components must read it from useData(), not from
+ * these constants directly (the exception is generateSeedData below, which
+ * only needs valid ids at seed time).
+ */
+export const INITIAL_PROJECT: Project = {
   id: "proj-1",
   nama: "Menara Cendana — Tower A",
   kode: "MCA",
 };
 
-export const USERS: User[] = [
+export const INITIAL_USERS: User[] = [
   { id: "u-eng", nama: "Dimas Prasetyo", email: "engineer@clashhub.dev", peran: "Engineer", isActive: true },
   { id: "u-coord", nama: "Siti Rahmawati", email: "coordinator@clashhub.dev", peran: "Coordinator", isActive: true },
   { id: "u-mgmt", nama: "Bambang Wijaya", email: "management@clashhub.dev", peran: "Management", isActive: true },
@@ -26,34 +34,34 @@ export const USERS: User[] = [
   { id: "u-coord2", nama: "Putri Lestari", email: "putri@clashhub.dev", peran: "Coordinator", isActive: true },
 ];
 
-export const DISCIPLINES: Discipline[] = [
-  { id: "disc-ars", kode: "ARS", nama: "Arsitektur" },
-  { id: "disc-str", kode: "STR", nama: "Struktur" },
-  { id: "disc-mep", kode: "MEP", nama: "Mekanikal/Elektrikal/Plumbing" },
-  { id: "disc-other", kode: "OTH", nama: "Lainnya" },
+export const INITIAL_DISCIPLINES: Discipline[] = [
+  { id: "disc-ars", kode: "ARS", nama: "Arsitektur", isActive: true },
+  { id: "disc-str", kode: "STR", nama: "Struktur", isActive: true },
+  { id: "disc-mep", kode: "MEP", nama: "Mekanikal/Elektrikal/Plumbing", isActive: true },
+  { id: "disc-other", kode: "OTH", nama: "Lainnya", isActive: true },
 ];
 
-export const ZONES: Zone[] = [
-  { id: "zone-1", nama: "Zona A", level: "Lantai 1" },
-  { id: "zone-2", nama: "Zona B", level: "Lantai 1" },
-  { id: "zone-3", nama: "Zona A", level: "Lantai 2" },
-  { id: "zone-4", nama: "Zona B", level: "Lantai 2" },
-  { id: "zone-5", nama: "Zona Core", level: "Lantai 3" },
-  { id: "zone-6", nama: "Basement", level: "B1" },
+export const INITIAL_ZONES: Zone[] = [
+  { id: "zone-1", nama: "Zona A", level: "Lantai 1", isActive: true },
+  { id: "zone-2", nama: "Zona B", level: "Lantai 1", isActive: true },
+  { id: "zone-3", nama: "Zona A", level: "Lantai 2", isActive: true },
+  { id: "zone-4", nama: "Zona B", level: "Lantai 2", isActive: true },
+  { id: "zone-5", nama: "Zona Core", level: "Lantai 3", isActive: true },
+  { id: "zone-6", nama: "Basement", level: "B1", isActive: true },
 ];
 
-export const STATUSES: Status[] = [
+export const INITIAL_STATUSES: Status[] = [
   { id: "st-open", nama: "Open", urutan: 1, isClosedState: false },
   { id: "st-inprogress", nama: "In Progress", urutan: 2, isClosedState: false },
   { id: "st-resolved", nama: "Resolved", urutan: 3, isClosedState: false },
   { id: "st-closed", nama: "Closed", urutan: 4, isClosedState: true },
 ];
 
-export const PRIORITIES: Priority[] = [
-  { id: "pr-low", nama: "Low", bobot: 1 },
-  { id: "pr-medium", nama: "Medium", bobot: 2 },
-  { id: "pr-high", nama: "High", bobot: 3 },
-  { id: "pr-critical", nama: "Critical", bobot: 4 },
+export const INITIAL_PRIORITIES: Priority[] = [
+  { id: "pr-low", nama: "Low", bobot: 1, isActive: true },
+  { id: "pr-medium", nama: "Medium", bobot: 2, isActive: true },
+  { id: "pr-high", nama: "High", bobot: 3, isActive: true },
+  { id: "pr-critical", nama: "Critical", bobot: 4, isActive: true },
 ];
 
 const TITLES = [
@@ -115,18 +123,18 @@ export function generateSeedData(count = 87): SeedData {
   const disciplineCounters: Record<string, number> = {};
 
   for (let i = 0; i < count; i++) {
-    const discipline = pick(rng, DISCIPLINES);
-    const zone = pick(rng, ZONES);
-    const priority = pick(rng, PRIORITIES);
+    const discipline = pick(rng, INITIAL_DISCIPLINES);
+    const zone = pick(rng, INITIAL_ZONES);
+    const priority = pick(rng, INITIAL_PRIORITIES);
     const statusRoll = rng();
     const status =
       statusRoll < 0.35
-        ? STATUSES[0]
+        ? INITIAL_STATUSES[0]
         : statusRoll < 0.6
-        ? STATUSES[1]
+        ? INITIAL_STATUSES[1]
         : statusRoll < 0.8
-        ? STATUSES[2]
-        : STATUSES[3];
+        ? INITIAL_STATUSES[2]
+        : INITIAL_STATUSES[3];
     const reporter = pick(rng, REPORTERS);
     const assignee = pick(rng, ASSIGNEES);
     const createdAt = addDays(now, -Math.floor(rng() * 90));
@@ -134,13 +142,13 @@ export function generateSeedData(count = 87): SeedData {
     const closedAt = status.isClosedState ? addDays(createdAt, 3 + Math.floor(rng() * 20)) : null;
 
     disciplineCounters[discipline.kode] = (disciplineCounters[discipline.kode] ?? 0) + 1;
-    const kodeUnik = `${PROJECT.kode}-${discipline.kode}-${String(disciplineCounters[discipline.kode]).padStart(4, "0")}`;
+    const kodeUnik = `${INITIAL_PROJECT.kode}-${discipline.kode}-${String(disciplineCounters[discipline.kode]).padStart(4, "0")}`;
     const id = `clash-${i + 1}`;
 
     const clash: Clash = {
       id,
       kodeUnik,
-      projectId: PROJECT.id,
+      projectId: INITIAL_PROJECT.id,
       judul: pick(rng, TITLES),
       deskripsi:
         "Hasil koordinasi model menunjukkan potensi bentrok antar elemen pada zona ini. Perlu verifikasi lapangan dan revisi shop drawing sebelum instalasi lanjutan.",
@@ -172,7 +180,7 @@ export function generateSeedData(count = 87): SeedData {
         aksi: "updated",
         field: "assignee",
         nilaiLama: "-",
-        nilaiBaru: USERS.find((u) => u.id === assignee)?.nama ?? assignee,
+        nilaiBaru: INITIAL_USERS.find((u) => u.id === assignee)?.nama ?? assignee,
         createdAt: addDays(createdAt, 1).toISOString(),
       });
     }

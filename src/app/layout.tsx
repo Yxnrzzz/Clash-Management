@@ -31,11 +31,11 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full">
-        <AuthProvider>
-          <DataProvider>
+        <DataProvider>
+          <AuthProvider>
             <AppShell>{children}</AppShell>
-          </DataProvider>
-        </AuthProvider>
+          </AuthProvider>
+        </DataProvider>
       </body>
     </html>
   );

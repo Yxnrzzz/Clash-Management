@@ -10,29 +10,15 @@ import {
 } from "@tanstack/react-table";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
-import { DISCIPLINES, PRIORITIES, STATUSES, USERS, ZONES } from "@/lib/mock-data";
-import {
-  disciplineById,
-  formatDate,
-  isOverdue,
-  priorityById,
-  statusById,
-  userById,
-  zoneById,
-} from "@/lib/lookup";
+import { useMasterDataLookups } from "@/lib/use-master-data";
+import { formatDate } from "@/lib/lookup";
+import { exportClashesToExcel, exportClashesToPdf } from "@/lib/export";
 import type { Clash } from "@/lib/types";
 import { PriorityBadge, StatusBadge, OverdueBadge } from "@/components/Badge";
 import { FilterChipGroup } from "./FilterChips";
+import { BulkToolbar } from "./BulkToolbar";
 
 const PAGE_SIZE = 10;
-
-// Derived once at module scope: these come from static master data, so
-// rebuilding them per render would needlessly break memoization downstream.
-const DISCIPLINE_OPTIONS = DISCIPLINES.map((d) => ({ id: d.id, label: d.kode }));
-const STATUS_OPTIONS = STATUSES.map((s) => ({ id: s.id, label: s.nama }));
-const PRIORITY_OPTIONS = PRIORITIES.map((p) => ({ id: p.id, label: p.nama }));
-const ZONE_OPTIONS = ZONES.map((z) => ({ id: z.id, label: `${z.level} · ${z.nama}` }));
-const ASSIGNEE_OPTIONS = USERS.map((u) => ({ id: u.id, label: u.nama }));
 
 const SORTABLE_FIELDS = new Set([
   "kodeUnik",
@@ -121,13 +107,26 @@ const columnHelper = createColumnHelper<Clash>();
 
 export function RegisterView() {
   const { user, isLoading } = useRequireAuth();
-  const { clashes } = useData();
+  const { clashes, project, bulkUpdateClashes } = useData();
+  const {
+    disciplines,
+    zones,
+    statuses,
+    priorities,
+    users,
+    disciplineById,
+    zoneById,
+    statusById,
+    priorityById,
+    userById,
+    isOverdue,
+  } = useMasterDataLookups();
 
-  // Filters live entirely in client state — no Next.js router navigation on
-  // every keystroke/click, only a cheap, non-blocking URL sync via the raw
-  // History API so the view stays shareable/back-button friendly.
+  const canBulkEdit = user?.peran === "Coordinator" || user?.peran === "Admin";
+
   const [filters, setFilters] = useState<FiltersState>(DEFAULT_FILTERS);
   const [searchInput, setSearchInput] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const hydrated = useRef(false);
 
   useEffect(() => {
@@ -190,6 +189,35 @@ export function RegisterView() {
   }, []);
 
   const { q, disc: disciplineIds, stat: statusIds, prio: priorityIds, zone: zoneIds, assignee: assigneeIds, cf: createdFrom, ct: createdTo, overdue: overdueOnly, sort: sortBy, dir: sortDir, page } = filters;
+
+  // Filter chips show every discipline/zone/priority ever used — including
+  // deactivated ones — so a coordinator can still find historical clashes
+  // tagged under master data an admin later retired.
+  const disciplineOptions = useMemo(
+    () => disciplines.map((d) => ({ id: d.id, label: d.isActive ? d.kode : `${d.kode} (nonaktif)` })),
+    [disciplines]
+  );
+  const statusOptions = useMemo(() => statuses.map((s) => ({ id: s.id, label: s.nama })), [statuses]);
+  const priorityOptions = useMemo(
+    () =>
+      [...priorities]
+        .sort((a, b) => a.bobot - b.bobot)
+        .map((p) => ({ id: p.id, label: p.isActive ? p.nama : `${p.nama} (nonaktif)` })),
+    [priorities]
+  );
+  const zoneOptions = useMemo(
+    () =>
+      zones.map((z) => ({
+        id: z.id,
+        label: z.isActive ? `${z.level} · ${z.nama}` : `${z.level} · ${z.nama} (nonaktif)`,
+      })),
+    [zones]
+  );
+  const assigneeOptions = useMemo(() => users.map((u) => ({ id: u.id, label: u.nama })), [users]);
+  const assignableUsers = useMemo(
+    () => users.filter((u) => u.isActive && (u.peran === "Engineer" || u.peran === "Coordinator")),
+    [users]
+  );
 
   const filtered = useMemo(() => {
     let result = clashes.filter((c) => {
@@ -257,14 +285,66 @@ export function RegisterView() {
     q,
     sortBy,
     sortDir,
+    statusById,
+    priorityById,
+    isOverdue,
   ]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
   const paged = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const pagedIds = useMemo(() => paged.map((c) => c.id), [paged]);
+  const allOnPageSelected = pagedIds.length > 0 && pagedIds.every((id) => selectedIds.has(id));
+
+  const toggleRowSelected = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleSelectAllOnPage = useCallback(() => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allOnPageSelected) {
+        pagedIds.forEach((id) => next.delete(id));
+      } else {
+        pagedIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  }, [allOnPageSelected, pagedIds]);
 
   const columns = useMemo(
     () => [
+      ...(canBulkEdit
+        ? [
+            columnHelper.display({
+              id: "select",
+              header: () => (
+                <input
+                  type="checkbox"
+                  checked={allOnPageSelected}
+                  onChange={toggleSelectAllOnPage}
+                  aria-label="Pilih semua di halaman ini"
+                  className="h-4 w-4 rounded border-zinc-300"
+                />
+              ),
+              cell: (info: { row: { original: Clash } }) => (
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(info.row.original.id)}
+                  onChange={() => toggleRowSelected(info.row.original.id)}
+                  aria-label={`Pilih ${info.row.original.kodeUnik}`}
+                  className="h-4 w-4 rounded border-zinc-300"
+                  onClick={(e) => e.stopPropagation()}
+                />
+              ),
+            }),
+          ]
+        : []),
       columnHelper.accessor("kodeUnik", {
         header: "Kode",
         cell: (info) => (
@@ -343,7 +423,7 @@ export function RegisterView() {
         cell: (info) => <span className="text-sm text-zinc-500">{formatDate(info.getValue())}</span>,
       }),
     ],
-    []
+    [canBulkEdit, allOnPageSelected, toggleSelectAllOnPage, selectedIds, toggleRowSelected, disciplineById, zoneById, statusById, priorityById, userById, isOverdue]
   );
 
   const table = useReactTable({
@@ -360,24 +440,72 @@ export function RegisterView() {
     disciplineIds.length + statusIds.length + priorityIds.length + zoneIds.length + assigneeIds.length +
     (createdFrom ? 1 : 0) + (createdTo ? 1 : 0) + (overdueOnly ? 1 : 0);
 
+  const exportLookups = { disciplineById, zoneById, statusById, priorityById, userById };
+  const dateStamp = new Date().toISOString().slice(0, 10);
+
+  function handleExportExcel() {
+    exportClashesToExcel(filtered, exportLookups, `clashhub-register-${dateStamp}.xlsx`);
+  }
+
+  function handleExportPdf() {
+    const closedCount = filtered.filter((c) => statusById(c.statusId)?.isClosedState).length;
+    const overdueCount = filtered.filter((c) => isOverdue(c)).length;
+    const resolved = filtered.filter((c) => c.closedAt);
+    const mttrDays =
+      resolved.length > 0
+        ? Math.round(
+            (resolved.reduce(
+              (sum, c) => sum + (new Date(c.closedAt!).getTime() - new Date(c.createdAt).getTime()),
+              0
+            ) /
+              resolved.length /
+              86_400_000) *
+              10
+          ) / 10
+        : null;
+    exportClashesToPdf(
+      filtered,
+      exportLookups,
+      { total: filtered.length, open: filtered.length - closedCount, closed: closedCount, overdue: overdueCount, mttrDays },
+      project.nama,
+      `clashhub-register-${dateStamp}.pdf`
+    );
+  }
+
   return (
     <div className="mx-auto max-w-7xl px-6 py-8">
-      <div className="mb-6 flex items-center justify-between">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-zinc-900">Clash Register</h1>
           <p className="text-sm text-zinc-500">
-            {filtered.length} item{filtered.length !== 1 ? "" : ""} ditemukan
+            {filtered.length} item ditemukan
             {user.peran === "Management" && " · Mode baca-saja"}
           </p>
         </div>
-        {user.peran !== "Management" && (
-          <Link
-            href="/clashes/new"
-            className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800"
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleExportExcel}
+            className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-50"
           >
-            + Input Clash Baru
-          </Link>
-        )}
+            Export Excel
+          </button>
+          <button
+            type="button"
+            onClick={handleExportPdf}
+            className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-50"
+          >
+            Export PDF
+          </button>
+          {user.peran !== "Management" && (
+            <Link
+              href="/clashes/new"
+              className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800"
+            >
+              + Input Clash Baru
+            </Link>
+          )}
+        </div>
       </div>
 
       <div className="mb-4 flex flex-col gap-4 rounded-2xl border border-zinc-200 bg-white p-4">
@@ -424,25 +552,25 @@ export function RegisterView() {
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           <FilterChipGroup
             label="Disiplin"
-            options={DISCIPLINE_OPTIONS}
+            options={disciplineOptions}
             selected={disciplineIds}
             onToggle={toggleDiscipline}
           />
           <FilterChipGroup
             label="Status"
-            options={STATUS_OPTIONS}
+            options={statusOptions}
             selected={statusIds}
             onToggle={toggleStatus}
           />
           <FilterChipGroup
             label="Prioritas"
-            options={PRIORITY_OPTIONS}
+            options={priorityOptions}
             selected={priorityIds}
             onToggle={togglePriority}
           />
           <FilterChipGroup
             label="Zona"
-            options={ZONE_OPTIONS}
+            options={zoneOptions}
             selected={zoneIds}
             onToggle={toggleZone}
           />
@@ -451,7 +579,7 @@ export function RegisterView() {
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <FilterChipGroup
             label="Assignee"
-            options={ASSIGNEE_OPTIONS}
+            options={assigneeOptions}
             selected={assigneeIds}
             onToggle={toggleAssignee}
           />
@@ -479,6 +607,20 @@ export function RegisterView() {
           </div>
         </div>
       </div>
+
+      {canBulkEdit && selectedIds.size > 0 && (
+        <BulkToolbar
+          selectedCount={selectedIds.size}
+          statuses={statuses}
+          priorities={priorities.filter((p) => p.isActive)}
+          assignableUsers={assignableUsers}
+          onClear={() => setSelectedIds(new Set())}
+          onApply={(patch) => {
+            bulkUpdateClashes(Array.from(selectedIds), patch, user.id);
+            setSelectedIds(new Set());
+          }}
+        />
+      )}
 
       <div className="overflow-x-auto rounded-2xl border border-zinc-200 bg-white">
         <table className="w-full border-collapse text-left">

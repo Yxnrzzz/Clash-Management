@@ -16,7 +16,6 @@ import {
 } from "recharts";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
-import { PROJECT, STATUSES } from "@/lib/mock-data";
 import {
   computeMetrics,
   RANGE_PRESETS,
@@ -26,13 +25,6 @@ import {
 } from "@/lib/dashboard-metrics";
 import { ChartCard, formatNumber, LegendKey, StatTile, VizTooltip } from "./ChartPieces";
 import { AXIS_TICK, VIZ } from "./viz-tokens";
-
-const OPEN_STATUS_QUERY = STATUSES.filter((s) => !s.isClosedState)
-  .map((s) => s.id)
-  .join(",");
-const CLOSED_STATUS_QUERY = STATUSES.filter((s) => s.isClosedState)
-  .map((s) => s.id)
-  .join(",");
 
 interface DashFilters {
   preset: RangePreset;
@@ -67,8 +59,17 @@ const Y_TICK = { ...AXIS_TICK, style: { fontVariantNumeric: "tabular-nums" as co
 
 export function DashboardView() {
   const { user, isLoading } = useRequireAuth();
-  const { clashes } = useData();
+  const { clashes, project, statuses, disciplines, priorities, zones } = useData();
   const router = useRouter();
+
+  const openStatusQuery = useMemo(
+    () => statuses.filter((s) => !s.isClosedState).map((s) => s.id).join(","),
+    [statuses]
+  );
+  const closedStatusQuery = useMemo(
+    () => statuses.filter((s) => s.isClosedState).map((s) => s.id).join(","),
+    [statuses]
+  );
 
   const [filters, setFilters] = useState<DashFilters>(DEFAULT_DASH_FILTERS);
   const [showTable, setShowTable] = useState(false);
@@ -90,8 +91,8 @@ export function DashboardView() {
 
   const metrics = useMemo(() => {
     const range = resolveRange(filters.preset, filters.from, filters.to);
-    return computeMetrics(clashes, range);
-  }, [clashes, filters]);
+    return computeMetrics(clashes, range, { statuses, disciplines, priorities, zones });
+  }, [clashes, filters, statuses, disciplines, priorities, zones]);
 
   const drillTo = useCallback(
     (key: string) => (entry: unknown) => {
@@ -141,12 +142,12 @@ export function DashboardView() {
             Proyek
           </label>
           <select
-            value={PROJECT.id}
+            value={project.id}
             disabled
             className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-700 disabled:opacity-70"
           >
-            <option value={PROJECT.id}>
-              {PROJECT.kode} — {PROJECT.nama}
+            <option value={project.id}>
+              {project.kode} — {project.nama}
             </option>
           </select>
         </div>
@@ -214,12 +215,12 @@ export function DashboardView() {
           label="Belum selesai"
           value={formatNumber(metrics.openCount)}
           caption="Open · In Progress · Resolved"
-          href={`/register?stat=${OPEN_STATUS_QUERY}`}
+          href={`/register?stat=${openStatusQuery}`}
         />
         <StatTile
           label="Closed"
           value={formatNumber(metrics.closedCount)}
-          href={`/register?stat=${CLOSED_STATUS_QUERY}`}
+          href={`/register?stat=${closedStatusQuery}`}
         />
         <StatTile
           label="Overdue"
