@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm -v)",
+      "Bash(npx --yes create-next-app@latest clashhub-tmp --typescript --tailwind --eslint --app --src-dir --import-alias \"@/*\" --use-npm --no-turbopack --disable-git)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(npx next *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3100/register)",
+      "Bash(taskkill //F //FI \"WINDOWTITLE eq *next*\")",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //F //PID 24060)",
+      "Bash(node -e \"console.log\\('recharts', require\\('recharts/package.json'\\).version\\)\")",
+      "Bash(node \"/c/Users/awalu/AppData/Local/Temp/claude/bundled-skills/2.1.219/cbf728e9839d01e3eebcc6cfd85f4f52/dataviz/scripts/validate_palette.js\" \"#2a78d6,#eb6834\" --mode light --surface \"#ffffff\")",
+      "Bash(node \"/c/Users/awalu/AppData/Local/Temp/claude/bundled-skills/2.1.219/cbf728e9839d01e3eebcc6cfd85f4f52/dataviz/scripts/validate_palette.js\" \"#86b6ef,#5598e7,#2a78d6,#1c5cab\" --mode light --surface \"#ffffff\" --ordinal)"
+    ]
+  }
+}
