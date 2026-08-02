@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState } from "react";
+import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
@@ -23,6 +23,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     users,
     updateClashField,
     addComment,
+    loadClashDetail,
   } = useData();
   const { priorities, disciplineById, zoneById, statusById, priorityById, userById, isOverdue, allowedStatusTransitions } =
     useMasterDataLookups();
@@ -31,6 +32,14 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
   );
   const [tab, setTab] = useState<Tab>("lampiran");
   const [commentText, setCommentText] = useState("");
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // Comments and audit log are loaded lazily per clash — the Register never
+  // needs them, only this detail page does.
+  useEffect(() => {
+    void loadClashDetail(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadClashDetail is stable; only re-run when the route id changes
+  }, [id]);
 
   if (isLoading || !user) {
     return <div className="p-8 text-sm text-zinc-500">Memuat…</div>;
@@ -58,6 +67,30 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     .filter((a) => a.clashId === clash.id)
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   const clashAttachments = attachments.filter((a) => a.clashId === clash.id);
+  const clashId = clash.id;
+  const userId = user.id;
+
+  async function handleFieldChange(
+    field: "statusId" | "priorityId" | "assigneeId" | "dueDate",
+    value: string | null
+  ) {
+    setActionError(null);
+    try {
+      await updateClashField(clashId, field, value, userId);
+    } catch {
+      setActionError("Gagal menyimpan perubahan. Periksa koneksi dan coba lagi.");
+    }
+  }
+
+  async function handleAddComment(text: string) {
+    setActionError(null);
+    try {
+      await addComment(clashId, userId, text);
+      setCommentText("");
+    } catch {
+      setActionError("Gagal mengirim komentar. Periksa koneksi dan coba lagi.");
+    }
+  }
 
   function fieldLabel(field: string) {
     return { assigneeId: "Assignee", priorityId: "Prioritas", dueDate: "Due Date", statusId: "Status" }[
@@ -92,6 +125,10 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
           </p>
         </div>
       </div>
+
+      {actionError && (
+        <p className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{actionError}</p>
+      )}
 
       <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
@@ -197,8 +234,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                       onSubmit={(e) => {
                         e.preventDefault();
                         if (!commentText.trim()) return;
-                        addComment(clash.id, user.id, commentText.trim());
-                        setCommentText("");
+                        void handleAddComment(commentText.trim());
                       }}
                       className="flex items-start gap-2 pt-2"
                     >
@@ -261,7 +297,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                 {editable && statusOptions.length > 0 ? (
                   <select
                     value={clash.statusId}
-                    onChange={(e) => updateClashField(clash.id, "statusId", e.target.value, user.id)}
+                    onChange={(e) => void handleFieldChange("statusId", e.target.value)}
                     className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-sm"
                   >
                     <option value={clash.statusId}>{statusById(clash.statusId)?.nama} (saat ini)</option>
@@ -285,7 +321,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                 {editable && (user.peran === "Coordinator" || user.peran === "Admin") ? (
                   <select
                     value={clash.priorityId}
-                    onChange={(e) => updateClashField(clash.id, "priorityId", e.target.value, user.id)}
+                    onChange={(e) => void handleFieldChange("priorityId", e.target.value)}
                     className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-sm"
                   >
                     {priorities.filter((p) => p.isActive).map((p) => (
@@ -306,9 +342,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                 {user.peran === "Coordinator" || user.peran === "Admin" ? (
                   <select
                     value={clash.assigneeId ?? ""}
-                    onChange={(e) =>
-                      updateClashField(clash.id, "assigneeId", e.target.value || null, user.id)
-                    }
+                    onChange={(e) => void handleFieldChange("assigneeId", e.target.value || null)}
                     className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-sm"
                   >
                     <option value="">Belum ditugaskan</option>
@@ -332,11 +366,9 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                     type="date"
                     value={clash.dueDate ? clash.dueDate.slice(0, 10) : ""}
                     onChange={(e) =>
-                      updateClashField(
-                        clash.id,
+                      void handleFieldChange(
                         "dueDate",
-                        e.target.value ? new Date(e.target.value).toISOString() : null,
-                        user.id
+                        e.target.value ? new Date(e.target.value).toISOString() : null
                       )
                     }
                     className="mt-1 w-full rounded-lg border border-zinc-300 px-2 py-1.5 text-sm"

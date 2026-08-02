@@ -1,4 +1,5 @@
-import { PrismaClient, Role } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
+import { Prisma, PrismaClient, Role } from '@prisma/client';
 import { hash } from '@node-rs/argon2';
 
 const prisma = new PrismaClient();
@@ -57,6 +58,163 @@ const USERS = [
   { id: 'u-coord2', name: 'Putri Lestari', email: 'putri@clashhub.dev', role: Role.COORDINATOR },
 ];
 
+/**
+ * Demo clash data, ported from src/lib/mock-data.ts (generateSeedData) now
+ * that clashes live in the database instead of the browser's localStorage.
+ * Same deterministic mulberry32 RNG and seed value (42) so the generated
+ * dataset is identical to what the frontend used to produce locally.
+ */
+const CLASH_TITLES = [
+  'Bentrok pipa HVAC dengan balok struktur',
+  'Konflik jalur kabel listrik dengan plafon arsitektur',
+  'Kolom struktur menembus ruang tangga',
+  'Pipa air bersih bertabrakan dengan sparing STR',
+  'Ducting AC memotong balok anak',
+  'Instalasi sprinkler bentrok dengan jalur kabel tray',
+  'Dinding partisi menghalangi akses shaft MEP',
+  'Elevasi plafon tidak sesuai dengan ducting utama',
+  'Bukaan pintu terhalang kolom praktis',
+  'Jalur pipa drainase bentrok dengan pondasi',
+  'Panel listrik bentrok dengan railing tangga darurat',
+  'Bentrok grating floor dengan pipa chiller',
+  'Jalur kabel tray menembus balok utama',
+  'Ruang AHU tidak cukup untuk maintenance',
+  'Sparing plumbing tidak sesuai shop drawing struktur',
+];
+
+const CLASH_DESCRIPTION =
+  'Hasil koordinasi model menunjukkan potensi bentrok antar elemen pada zona ini. Perlu verifikasi lapangan dan revisi shop drawing sebelum instalasi lanjutan.';
+
+const REPORTER_IDS = ['u-eng', 'u-eng2', 'u-coord', 'u-coord2'];
+const ASSIGNEE_IDS: (string | null)[] = ['u-eng', 'u-eng2', 'u-coord', 'u-coord2', null];
+
+function mulberry32(seed: number) {
+  return function random() {
+    seed |= 0;
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function pick<T>(rng: () => number, arr: T[]): T {
+  return arr[Math.floor(rng() * arr.length)];
+}
+
+function addDays(date: Date, days: number) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+async function seedClashes(projectCode: string) {
+  const existing = await prisma.clash.count();
+  if (existing > 0) {
+    console.log(`Clash sudah ada (${existing}), lewati seeding clash.`);
+    return;
+  }
+
+  const rng = mulberry32(42);
+  const now = new Date('2026-07-31T09:00:00');
+  const disciplineCounters: Record<string, number> = {};
+
+  const clashRows: Prisma.ClashCreateManyInput[] = [];
+  const auditRows: Prisma.AuditLogCreateManyInput[] = [];
+  const commentRows: Prisma.CommentCreateManyInput[] = [];
+
+  const count = 87;
+  for (let i = 0; i < count; i++) {
+    const discipline = pick(rng, DISCIPLINES);
+    const zone = pick(rng, ZONES);
+    const priority = pick(rng, PRIORITIES);
+    const statusRoll = rng();
+    const status =
+      statusRoll < 0.35
+        ? STATUSES[0]
+        : statusRoll < 0.6
+          ? STATUSES[1]
+          : statusRoll < 0.8
+            ? STATUSES[2]
+            : STATUSES[3];
+    const reporterId = pick(rng, REPORTER_IDS);
+    const assigneeId = pick(rng, ASSIGNEE_IDS);
+    const createdAt = addDays(now, -Math.floor(rng() * 90));
+    const dueDate = rng() < 0.85 ? addDays(createdAt, 5 + Math.floor(rng() * 25)) : null;
+    const closedAt = status.isClosedState ? addDays(createdAt, 3 + Math.floor(rng() * 20)) : null;
+
+    disciplineCounters[discipline.code] = (disciplineCounters[discipline.code] ?? 0) + 1;
+    const uniqueCode = `${projectCode}-${discipline.code}-${String(
+      disciplineCounters[discipline.code],
+    ).padStart(4, '0')}`;
+    const id = randomUUID();
+
+    clashRows.push({
+      id,
+      uniqueCode,
+      projectId: PROJECT.id,
+      title: pick(rng, CLASH_TITLES),
+      description: CLASH_DESCRIPTION,
+      disciplineId: discipline.id,
+      zoneId: zone.id,
+      statusId: status.id,
+      priorityId: priority.id,
+      reporterId,
+      assigneeId,
+      dueDate,
+      createdAt,
+      closedAt,
+    });
+
+    auditRows.push({
+      clashId: id,
+      actorId: reporterId,
+      action: 'created',
+      createdAt,
+    });
+
+    if (assigneeId) {
+      auditRows.push({
+        clashId: id,
+        actorId: 'u-coord',
+        action: 'updated',
+        field: 'assigneeId',
+        oldValue: '-',
+        newValue: USERS.find((u) => u.id === assigneeId)?.name ?? assigneeId,
+        createdAt: addDays(createdAt, 1),
+      });
+    }
+
+    if (status.sequence > 1) {
+      auditRows.push({
+        clashId: id,
+        actorId: assigneeId ?? 'u-coord',
+        action: 'updated',
+        field: 'statusId',
+        oldValue: 'Open',
+        newValue: status.name,
+        createdAt: addDays(createdAt, 2),
+      });
+    }
+
+    if (rng() < 0.4) {
+      commentRows.push({
+        clashId: id,
+        authorId: assigneeId ?? reporterId,
+        content:
+          'Sudah dicek di lapangan, perlu koordinasi ulang dengan tim STR untuk revisi elevasi.',
+        createdAt: addDays(createdAt, 2),
+      });
+    }
+  }
+
+  await prisma.clash.createMany({ data: clashRows });
+  await prisma.auditLog.createMany({ data: auditRows });
+  await prisma.comment.createMany({ data: commentRows });
+
+  console.log(`Seed clash selesai: ${clashRows.length} clash, ${auditRows.length} audit log, ${commentRows.length} komentar.`);
+}
+
 async function main() {
   const project = await prisma.project.upsert({
     where: { id: PROJECT.id },
@@ -103,6 +261,8 @@ async function main() {
       create: { projectId: project.id, userId: user.id, projectRole: user.role },
     });
   }
+
+  await seedClashes(project.code);
 
   console.log('Seed selesai:', {
     project: project.code,

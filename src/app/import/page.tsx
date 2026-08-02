@@ -66,7 +66,14 @@ export default function ImportPage() {
   const [rows, setRows] = useState<string[][]>([]);
   const [mapping, setMapping] = useState<Mapping>(EMPTY_MAPPING);
   const [results, setResults] = useState<RowResult[] | null>(null);
-  const [committed, setCommitted] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [isCommitting, setIsCommitting] = useState(false);
+  const [commitProgress, setCommitProgress] = useState(0);
+  const [commitSummary, setCommitSummary] = useState<{
+    success: number;
+    failed: number;
+    errors: string[];
+  } | null>(null);
 
   if (isLoading || !user) {
     return <div className="p-8 text-sm text-zinc-500">Memuat…</div>;
@@ -85,6 +92,7 @@ export default function ImportPage() {
   const importerId = user.id;
 
   function handleFile(file: File) {
+    setFileError(null);
     const reader = new FileReader();
     reader.onload = () => {
       const { headers: h, rows: r } = parseCsv(String(reader.result));
@@ -104,6 +112,9 @@ export default function ImportPage() {
         dueDate: guess("duedate") || guess("tanggal"),
       });
       setStep("mapping");
+    };
+    reader.onerror = () => {
+      setFileError("Gagal membaca file. Pastikan file berupa CSV yang valid dan coba lagi.");
     };
     reader.readAsText(file);
   }
@@ -172,14 +183,31 @@ export default function ImportPage() {
     setStep("preview");
   }
 
-  function handleCommit() {
+  async function handleCommit() {
     if (!results) return;
+    setIsCommitting(true);
+    setCommitProgress(0);
+
+    // Committed sequentially, one API call per row — there is no bulk-create
+    // endpoint or server-side transaction, so a failure partway through
+    // leaves earlier rows created and later rows skipped. That is reported
+    // below rather than hidden.
+    let success = 0;
+    const errors: string[] = [];
     for (const r of results) {
       if (r.ok && r.data) {
-        createClash({ ...r.data, attachments: [] }, importerId);
+        try {
+          await createClash({ ...r.data, attachments: [] }, importerId);
+          success++;
+        } catch {
+          errors.push(`Baris ${r.rowNumber} ("${r.data.judul}"): gagal disimpan ke server.`);
+        }
+        setCommitProgress((p) => p + 1);
       }
     }
-    setCommitted(true);
+
+    setCommitSummary({ success, failed: errors.length, errors });
+    setIsCommitting(false);
   }
 
   const validCount = results?.filter((r) => r.ok).length ?? 0;
@@ -204,6 +232,9 @@ export default function ImportPage() {
 
       {step === "upload" && (
         <div className="mt-6 space-y-4">
+          {fileError && (
+            <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{fileError}</p>
+          )}
           <div
             onClick={() => fileInputRef.current?.click()}
             className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-zinc-300 px-6 py-10 text-center hover:border-zinc-400"
@@ -291,14 +322,33 @@ export default function ImportPage() {
 
       {step === "preview" && results && (
         <div className="mt-6">
-          {committed ? (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-6 text-center">
-              <p className="text-sm font-semibold text-emerald-800">
-                Import selesai: {validCount} clash berhasil dibuat, {invalidCount} baris dilewati.
+          {commitSummary ? (
+            <div
+              className={`rounded-2xl border p-6 text-center ${
+                commitSummary.failed > 0
+                  ? "border-amber-200 bg-amber-50"
+                  : "border-emerald-200 bg-emerald-50"
+              }`}
+            >
+              <p
+                className={`text-sm font-semibold ${
+                  commitSummary.failed > 0 ? "text-amber-800" : "text-emerald-800"
+                }`}
+              >
+                Import selesai: {commitSummary.success} clash berhasil dibuat
+                {invalidCount > 0 && `, ${invalidCount} baris dilewati saat validasi`}
+                {commitSummary.failed > 0 && `, ${commitSummary.failed} baris gagal disimpan ke server`}.
               </p>
+              {commitSummary.errors.length > 0 && (
+                <ul className="mx-auto mt-3 max-w-md space-y-1 text-left text-xs text-amber-700">
+                  {commitSummary.errors.map((err) => (
+                    <li key={err}>• {err}</li>
+                  ))}
+                </ul>
+              )}
               <Link
                 href="/register"
-                className="mt-3 inline-block rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800"
+                className="mt-4 inline-block rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800"
               >
                 Lihat di Register
               </Link>
@@ -335,20 +385,28 @@ export default function ImportPage() {
                   </tbody>
                 </table>
               </div>
-              <div className="mt-5 flex justify-between">
+              <div className="mt-5 flex items-center justify-between">
                 <button
                   onClick={() => setStep("mapping")}
-                  className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-50"
+                  disabled={isCommitting}
+                  className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-40"
                 >
                   Kembali ke Mapping
                 </button>
-                <button
-                  onClick={handleCommit}
-                  disabled={validCount === 0}
-                  className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800 disabled:opacity-40"
-                >
-                  Commit {validCount} Clash
-                </button>
+                <div className="flex items-center gap-3">
+                  {isCommitting && (
+                    <span className="text-xs text-zinc-500">
+                      Menyimpan {commitProgress}/{validCount}…
+                    </span>
+                  )}
+                  <button
+                    onClick={handleCommit}
+                    disabled={validCount === 0 || isCommitting}
+                    className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800 disabled:opacity-40"
+                  >
+                    {isCommitting ? "Menyimpan…" : `Commit ${validCount} Clash`}
+                  </button>
+                </div>
               </div>
             </>
           )}

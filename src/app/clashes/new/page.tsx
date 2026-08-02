@@ -49,6 +49,8 @@ export default function NewClashPage() {
   const [files, setFiles] = useState<PendingFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [submitted, setSubmitted] = useState<{ kodeUnik: string; id: string } | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   if (isLoading || !user) {
     return <div className="p-8 text-sm text-zinc-500">Memuat…</div>;
@@ -89,7 +91,7 @@ export default function NewClashPage() {
     setFiles((prev) => prev.filter((_, i) => i !== index));
   }
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const result = clashSchema.safeParse(values);
     if (!result.success) {
@@ -105,25 +107,33 @@ export default function NewClashPage() {
       return;
     }
     setErrors({});
+    setSubmitError(null);
+    setIsSubmitting(true);
 
-    const clash = createClash(
-      {
-        judul: result.data.judul,
-        disciplineId: result.data.disciplineId,
-        zoneId: result.data.zoneId,
-        priorityId: result.data.priorityId,
-        deskripsi: result.data.deskripsi,
-        dueDate: result.data.dueDate || undefined,
-        attachments: files.map((f) => ({
-          namaFile: f.file.name,
-          tipe: f.file.type === "application/pdf" ? "pdf" : "image",
-          ukuranBytes: f.file.size,
-          file: f.file,
-        })),
-      },
-      reporterId
-    );
-    setSubmitted({ kodeUnik: clash.kodeUnik, id: clash.id });
+    try {
+      const clash = await createClash(
+        {
+          judul: result.data.judul,
+          disciplineId: result.data.disciplineId,
+          zoneId: result.data.zoneId,
+          priorityId: result.data.priorityId,
+          deskripsi: result.data.deskripsi,
+          dueDate: result.data.dueDate || undefined,
+          attachments: files.map((f) => ({
+            namaFile: f.file.name,
+            tipe: f.file.type === "application/pdf" ? "pdf" : "image",
+            ukuranBytes: f.file.size,
+            file: f.file,
+          })),
+        },
+        reporterId
+      );
+      setSubmitted({ kodeUnik: clash.kodeUnik, id: clash.id });
+    } catch {
+      setSubmitError("Gagal membuat clash. Periksa koneksi dan coba lagi.");
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   const hasFileErrors = files.some((f) => f.error);
@@ -335,6 +345,10 @@ export default function NewClashPage() {
           )}
         </div>
 
+        {submitError && (
+          <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{submitError}</p>
+        )}
+
         <div className="flex justify-end gap-3 border-t border-zinc-100 pt-5">
           <button
             type="button"
@@ -345,10 +359,10 @@ export default function NewClashPage() {
           </button>
           <button
             type="submit"
-            disabled={hasFileErrors}
+            disabled={hasFileErrors || isSubmitting}
             className="rounded-lg bg-zinc-900 px-5 py-2 text-sm font-semibold text-white hover:bg-zinc-800 disabled:opacity-40"
           >
-            Submit Clash
+            {isSubmitting ? "Menyimpan…" : "Submit Clash"}
           </button>
         </div>
       </form>

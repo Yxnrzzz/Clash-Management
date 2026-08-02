@@ -142,7 +142,13 @@ model Clash {
   auditLogs     AuditLog[]
   notifications Notification[]
 
-  @@index([projectId, statusId, priorityId, disciplineId, zoneId, assigneeId, dueDate, createdAt])
+  // Replaces a single 8-column composite index that only ever served queries
+  // prefixed by projectId. These four match the Register's actual filter/sort
+  // patterns (default list order, status chips, "my clashes", due-date sort).
+  @@index([projectId, createdAt])
+  @@index([projectId, statusId])
+  @@index([projectId, assigneeId])
+  @@index([projectId, dueDate])
 }
 
 model Attachment {
@@ -168,6 +174,8 @@ model Comment {
 
   clash  Clash @relation(fields: [clashId], references: [id])
   author User  @relation(fields: [authorId], references: [id])
+
+  @@index([clashId, createdAt])
 }
 
 model AuditLog {
@@ -182,6 +190,8 @@ model AuditLog {
 
   clash Clash @relation(fields: [clashId], references: [id])
   actor User  @relation(fields: [actorId], references: [id])
+
+  @@index([clashId, createdAt])
 }
 
 model Notification {

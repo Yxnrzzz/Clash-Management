@@ -1,5 +1,20 @@
-import type { Discipline, Priority, Project, Role, Status, User, Zone } from "../types";
 import type {
+  AuditLogEntry,
+  Clash,
+  Comment,
+  Discipline,
+  NewClashInput,
+  Priority,
+  Project,
+  Role,
+  Status,
+  User,
+  Zone,
+} from "../types";
+import type {
+  ApiAuditLog,
+  ApiClash,
+  ApiComment,
   ApiDiscipline,
   ApiPriority,
   ApiProject,
@@ -106,3 +121,57 @@ export const statusPayload = (input: Partial<Pick<Status, "nama" | "isClosedStat
   ...(input.nama !== undefined ? { name: input.nama } : {}),
   ...(input.isClosedState !== undefined ? { isClosedState: input.isClosedState } : {}),
 });
+
+// --- Clashes, comments, audit log --------------------------------------------
+
+export const toClash = (c: ApiClash): Clash => ({
+  id: c.id,
+  kodeUnik: c.uniqueCode,
+  projectId: c.projectId,
+  judul: c.title,
+  deskripsi: c.description,
+  disciplineId: c.disciplineId,
+  zoneId: c.zoneId,
+  statusId: c.statusId,
+  priorityId: c.priorityId,
+  reporterId: c.reporterId,
+  assigneeId: c.assigneeId,
+  dueDate: c.dueDate,
+  createdAt: c.createdAt,
+  closedAt: c.closedAt,
+});
+
+export const toComment = (c: ApiComment): Comment => ({
+  id: c.id,
+  clashId: c.clashId,
+  authorId: c.authorId,
+  isi: c.content,
+  createdAt: c.createdAt,
+});
+
+export const toAuditLog = (a: ApiAuditLog): AuditLogEntry => ({
+  id: a.id,
+  clashId: a.clashId,
+  actorId: a.actorId,
+  aksi: a.action,
+  field: a.field ?? undefined,
+  nilaiLama: a.oldValue ?? undefined,
+  nilaiBaru: a.newValue ?? undefined,
+  createdAt: a.createdAt,
+});
+
+export const newClashPayload = (input: Omit<NewClashInput, "attachments">) => ({
+  title: input.judul,
+  description: input.deskripsi,
+  disciplineId: input.disciplineId,
+  zoneId: input.zoneId,
+  priorityId: input.priorityId,
+  ...(input.dueDate !== undefined ? { dueDate: input.dueDate } : {}),
+});
+
+export type ClashFieldPatch = Partial<{
+  statusId: string;
+  priorityId: string;
+  assigneeId: string | null;
+  dueDate: string | null;
+}>;

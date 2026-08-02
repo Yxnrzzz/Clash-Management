@@ -55,3 +55,44 @@ export interface ApiSession {
   accessToken: string;
   user: ApiUser;
 }
+
+export interface ApiClash {
+  id: string;
+  uniqueCode: string;
+  projectId: string;
+  title: string;
+  description: string;
+  disciplineId: string;
+  zoneId: string;
+  statusId: string;
+  priorityId: string;
+  reporterId: string;
+  assigneeId: string | null;
+  dueDate: string | null;
+  createdAt: string;
+  closedAt: string | null;
+}
+
+export interface ApiComment {
+  id: string;
+  clashId: string;
+  authorId: string;
+  content: string;
+  createdAt: string;
+}
+
+export interface ApiAuditLog {
+  id: string;
+  clashId: string;
+  actorId: string;
+  action: string;
+  field?: string | null;
+  oldValue?: string | null;
+  newValue?: string | null;
+  createdAt: string;
+}
+
+export interface ApiClashDetail extends ApiClash {
+  comments: ApiComment[];
+  auditLogs: ApiAuditLog[];
+}

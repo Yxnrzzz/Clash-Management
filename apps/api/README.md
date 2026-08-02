@@ -1,4 +1,4 @@
-# ClashHub API — Sprint 1 (Auth, RBAC & Administrasi)
+# ClashHub API — Sprint 1 (Auth, RBAC & Administrasi) + ClashesModule
 
 Backend NestJS untuk ClashHub. PostgreSQL & Redis dijalankan via Docker Compose, skema dikelola oleh Prisma ORM.
 
@@ -51,7 +51,7 @@ Server berjalan di `http://localhost:3001` dengan prefix `/api` (port dikonfigur
 npm test
 ```
 
-Mencakup `RolesGuard` (izin/tolak per peran) dan `AuthService` (login benar/salah/akun nonaktif, isi payload token).
+Mencakup `RolesGuard` (izin/tolak per peran), `AuthService` (login benar/salah/akun nonaktif, isi payload token), dan `ClashesService` (RBAC per-field, transisi status, `closedAt`, audit log, format `uniqueCode`) — 26 test total.
 
 ## Environment
 
@@ -94,6 +94,14 @@ JWT_REFRESH_TTL="7d"
 | POST | `/api/master-data/disciplines` \| `zones` \| `priorities` | Admin |
 | PATCH | `/api/master-data/disciplines/:id` \| `zones/:id` \| `priorities/:id` \| `statuses/:id` | Admin |
 | PATCH | `/api/master-data/{disciplines,zones,priorities}/:id/active` | Admin |
+| GET | `/api/clashes` | semua yang login (seluruh clash proyek aktif, tanpa pagination server-side) |
+| GET | `/api/clashes/:id` | semua yang login (clash + komentar + audit log) |
+| POST | `/api/clashes` | Engineer, Coordinator, Admin |
+| PATCH | `/api/clashes/:id` | Engineer (item sendiri, status maju 1 langkah saja, tidak boleh menutup), Coordinator/Admin (penuh) |
+| POST | `/api/clashes/bulk` | Coordinator, Admin |
+| POST | `/api/clashes/:id/comments` | Engineer, Coordinator, Admin |
+
+`PATCH /api/clashes/:id` menerima subset `{ statusId, priorityId, assigneeId, dueDate }`. Aturan siapa boleh mengubah field mana ditegakkan di `ClashesService` (`assertCanEdit`, `buildAllowedPatch`), bukan cuma `@Roles()` — lihat `src/clashes/clashes.service.ts`. Setiap field yang benar-benar berubah menulis satu baris `AuditLog`, dengan `oldValue`/`newValue` sudah diterjemahkan ke nama (bukan id mentah). `uniqueCode` pada `POST /api/clashes` dibuat server-side dalam transaksi, format `{kode-proyek}-{kode-disiplin}-{urutan 4 digit}`.
 
 Status **tidak** bisa ditambah atau dihapus — hanya label dan `isClosedState` yang bisa diubah. Alasannya `allowedStatusTransitions()` di frontend bergantung pada rantai empat tahap yang tetap (`sequence`). Server juga menolak permintaan yang membuat tidak ada satu pun status penutup tersisa.
 
@@ -114,6 +122,8 @@ Tambahan: `rizky@clashhub.dev` (Engineer), `putri@clashhub.dev` (Coordinator).
 
 ## Catatan seed
 
-`prisma/seed.ts` sengaja memakai **id eksplisit yang sama persis dengan `src/lib/mock-data.ts`** di frontend (`proj-1`, `u-eng`, `disc-ars`, `st-open`, `pr-low`, `zone-1`, …), bukan uuid acak. Selama frontend masih dalam fase hybrid — master data dari API, clash masih di `localStorage` — setiap clash mock menyimpan foreign key seperti `disciplineId: "disc-ars"`. Kalau id di database acak, seluruh clash mock jadi orphan dan Register serta Dashboard ikut kosong.
+`prisma/seed.ts` sengaja memakai **id eksplisit yang mudah dibaca** untuk master data dan user (`proj-1`, `u-eng`, `disc-ars`, `st-open`, `pr-low`, `zone-1`, …), bukan uuid acak — mempermudah membaca data lewat Prisma Studio/psql dan menjaga seed idempoten. **Id-id ini bukan format uuid**, jadi DTO manapun yang mereferensikannya (mis. `disciplineId` di `CreateClashDto`) harus divalidasi sebagai string biasa, bukan `@IsUUID()`.
 
-Seed bersifat idempoten (memakai `upsert`), jadi aman dijalankan ulang. `passwordHash` sengaja tidak ikut di-update agar password yang sudah diganti admin tidak ter-reset.
+Seeding master data & user bersifat idempoten (memakai `upsert`), jadi aman dijalankan ulang. `passwordHash` sengaja tidak ikut di-update agar password yang sudah diganti admin tidak ter-reset.
+
+Seeding **clash** (87 baris deterministik, RNG mulberry32 seed 42, fungsi `seedClashes()`) hanya jalan kalau tabel `Clash` masih kosong — dicek lewat `prisma.clash.count()`. Ini beda dari master data: clash **tidak** di-`upsert` ulang setiap kali seed dijalankan, supaya data yang sudah dibuat lewat aplikasi (bukan seed) tidak tertimpa. Untuk reset penuh, kosongkan tabel `Clash`/`Comment`/`AuditLog` secara manual lalu jalankan `npx prisma db seed` lagi.

@@ -9,13 +9,16 @@ import {
   useRef,
   useState,
 } from "react";
-import { generateSeedData } from "./mock-data";
 import { apiGet, apiPatch, apiPost } from "./api/client";
 import {
   disciplinePayload,
+  newClashPayload,
   priorityPayload,
   projectPayload,
   statusPayload,
+  toAuditLog,
+  toClash,
+  toComment,
   toDiscipline,
   toPriority,
   toProject,
@@ -24,8 +27,12 @@ import {
   toZone,
   userPayload,
   zonePayload,
+  type ClashFieldPatch,
 } from "./api/mappers";
 import type {
+  ApiClash,
+  ApiClashDetail,
+  ApiComment,
   ApiDiscipline,
   ApiPriority,
   ApiProject,
@@ -49,28 +56,27 @@ import type {
 } from "./types";
 
 /**
- * Hybrid phase (Sprint 1): master data — project, users, disciplines, zones,
- * statuses, priorities — is served by the NestJS API, while clashes, comments,
- * audit logs, attachments and notification preferences still live in
- * localStorage until their modules exist on the backend.
+ * Post-hybrid phase (Sprint 2-4): master data — project, users, disciplines,
+ * zones, statuses, priorities — plus clashes, comments and audit logs are all
+ * served by the NestJS API. Only attachments and notification preferences
+ * still live in localStorage: attachments because object storage doesn't
+ * exist yet (deferred, see HANDOFF.md), notification preferences because the
+ * notifications module hasn't been built.
  *
- * The two halves line up because the API seed uses the same ids as
- * mock-data.ts (`disc-ars`, `u-eng`, `st-open`, …), so a mock clash's
- * disciplineId still resolves against master data coming from the database.
+ * Comments and audit logs are loaded lazily per clash via loadClashDetail()
+ * rather than in the initial batch fetch — the list view never needs them,
+ * only the detail page does.
  */
 
-const STORAGE_KEY = "clashhub-data-v3";
+const STORAGE_KEY = "clashhub-data-v4";
 
 /** How long a keystroke-driven edit waits before it is PATCHed to the server. */
 const PATCH_DEBOUNCE_MS = 500;
 
 const EMPTY_PROJECT: Project = { id: "", nama: "", kode: "" };
 
-/** The half that is still persisted in the browser. */
+/** The half still persisted in the browser (no backend module yet). */
 interface LocalState {
-  clashes: Clash[];
-  comments: Comment[];
-  auditLogs: AuditLogEntry[];
   attachments: Attachment[];
   notificationPreferences: NotificationPreference[];
 }
@@ -83,6 +89,10 @@ interface MasterState {
   zones: Zone[];
   statuses: Status[];
   priorities: Priority[];
+  clashes: Clash[];
+  /** Populated lazily, clash by clash, via loadClashDetail(). */
+  comments: Comment[];
+  auditLogs: AuditLogEntry[];
 }
 
 type ClashEditableField = "assigneeId" | "priorityId" | "dueDate" | "statusId";
@@ -100,20 +110,22 @@ interface DataContextValue extends LocalState, MasterState {
   reloadMasterData: () => Promise<void>;
   /** Called by AuthProvider on sign-out or when no session could be restored. */
   clearMasterData: () => void;
+  /** Fetches one clash's comments + audit log and merges them into context. */
+  loadClashDetail: (clashId: string) => Promise<void>;
 
-  createClash: (input: NewClashInput, reporterId: string) => Clash;
+  createClash: (input: NewClashInput, reporterId: string) => Promise<Clash>;
   updateClashField: (
     clashId: string,
     field: ClashEditableField,
     newValue: string | null,
     actorId: string
-  ) => void;
+  ) => Promise<void>;
   bulkUpdateClashes: (
     ids: string[],
     patch: Partial<Record<ClashEditableField, string | null>>,
     actorId: string
-  ) => { updated: number };
-  addComment: (clashId: string, authorId: string, isi: string) => void;
+  ) => Promise<{ updated: number }>;
+  addComment: (clashId: string, authorId: string, isi: string) => Promise<void>;
 
   updateProject: (patch: Partial<Pick<Project, "nama" | "kode">>) => void;
 
@@ -144,11 +156,14 @@ interface DataContextValue extends LocalState, MasterState {
 const DataContext = createContext<DataContextValue | null>(null);
 
 function loadInitialLocal(): LocalState {
-  return { notificationPreferences: [], ...generateSeedData() };
+  return { attachments: [], notificationPreferences: [] };
 }
 
-function genId(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 10_000)}`;
+/** Merges `incoming` into `existing` by id, incoming wins on conflict. */
+function mergeById<T extends { id: string }>(existing: T[], incoming: T[]): T[] {
+  const map = new Map(existing.map((item) => [item.id, item]));
+  for (const item of incoming) map.set(item.id, item);
+  return Array.from(map.values());
 }
 
 function messageOf(error: unknown): string {
@@ -194,14 +209,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const reloadMasterData = useCallback(async () => {
     try {
-      const [project, users, disciplines, zones, statuses, priorities] = await Promise.all([
-        apiGet<ApiProject>("/projects/current"),
-        apiGet<ApiUser[]>("/users"),
-        apiGet<ApiDiscipline[]>("/master-data/disciplines"),
-        apiGet<ApiZone[]>("/master-data/zones"),
-        apiGet<ApiStatus[]>("/master-data/statuses"),
-        apiGet<ApiPriority[]>("/master-data/priorities"),
-      ]);
+      const [project, users, disciplines, zones, statuses, priorities, clashes] =
+        await Promise.all([
+          apiGet<ApiProject>("/projects/current"),
+          apiGet<ApiUser[]>("/users"),
+          apiGet<ApiDiscipline[]>("/master-data/disciplines"),
+          apiGet<ApiZone[]>("/master-data/zones"),
+          apiGet<ApiStatus[]>("/master-data/statuses"),
+          apiGet<ApiPriority[]>("/master-data/priorities"),
+          apiGet<ApiClash[]>("/clashes"),
+        ]);
 
       setMaster({
         project: toProject(project),
@@ -210,6 +227,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         zones: zones.map(toZone),
         statuses: statuses.map(toStatus),
         priorities: priorities.map(toPriority),
+        clashes: clashes.map(toClash),
+        comments: [],
+        auditLogs: [],
       });
       setSyncError(null);
     } catch (error) {
@@ -283,69 +303,28 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
-  // --- Clashes (still local) ------------------------------------------------
+  // --- Clashes ---------------------------------------------------------------
 
   /**
-   * Clashes live in localStorage but their codes and default status come from
-   * API-backed master data. A ref keeps that reachable from the setLocal
-   * updater without adding `master` to every callback's dependency list.
+   * Creates the clash on the server (which assigns uniqueCode, default
+   * status, reporterId from the JWT, and writes the "created" audit row),
+   * then attaches whatever files were staged locally. Attachments stay
+   * client-only until object storage exists — see the Attachment type.
    */
-  const masterRef = useRef<MasterState | null>(null);
-  useEffect(() => {
-    masterRef.current = master;
-  }, [master]);
+  const createClash = useCallback(
+    async (input: NewClashInput, reporterId: string): Promise<Clash> => {
+      const createdApi = await runWrite(
+        () => apiPost<ApiClash>("/clashes", newClashPayload(input)),
+        (result) =>
+          patchMaster((prev) => ({ ...prev, clashes: [toClash(result), ...prev.clashes] }))
+      );
+      const created = toClash(createdApi);
 
-  const createClash = useCallback((input: NewClashInput, reporterId: string): Clash => {
-    let created!: Clash;
-    const newPreviewUrls: Record<string, string> = {};
-    const currentMaster = masterRef.current;
-
-    setLocal((prev) => {
-      const base = prev ?? loadInitialLocal();
+      const newPreviewUrls: Record<string, string> = {};
       const nowIso = new Date().toISOString();
-
-      const discipline = currentMaster?.disciplines.find((d) => d.id === input.disciplineId);
-      const countExisting = base.clashes.filter(
-        (c) => c.disciplineId === input.disciplineId
-      ).length;
-      const projectKode = currentMaster?.project.kode ?? "";
-      const kodeUnik = `${projectKode}-${discipline?.kode ?? "???"}-${String(
-        countExisting + 1
-      ).padStart(4, "0")}`;
-      const openStatus = [...(currentMaster?.statuses ?? [])].sort(
-        (a, b) => a.urutan - b.urutan
-      )[0];
-
-      created = {
-        id: genId("clash"),
-        kodeUnik,
-        projectId: currentMaster?.project.id ?? "",
-        judul: input.judul,
-        deskripsi: input.deskripsi,
-        disciplineId: input.disciplineId,
-        zoneId: input.zoneId,
-        statusId: openStatus?.id ?? "",
-        priorityId: input.priorityId,
-        reporterId,
-        assigneeId: null,
-        dueDate: input.dueDate ? new Date(input.dueDate).toISOString() : null,
-        createdAt: nowIso,
-        closedAt: null,
-      };
-
-      const auditEntry: AuditLogEntry = {
-        id: `audit-${created.id}-created`,
-        clashId: created.id,
-        actorId: reporterId,
-        aksi: "created",
-        createdAt: nowIso,
-      };
-
       const newAttachments: Attachment[] = input.attachments.map((a, idx) => {
         const id = `att-${created.id}-${idx}`;
-        if (a.file) {
-          newPreviewUrls[id] = URL.createObjectURL(a.file);
-        }
+        if (a.file) newPreviewUrls[id] = URL.createObjectURL(a.file);
         return {
           id,
           clashId: created.id,
@@ -357,143 +336,104 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         };
       });
 
-      return {
-        ...base,
-        clashes: [created, ...base.clashes],
-        auditLogs: [...base.auditLogs, auditEntry],
-        attachments: [...base.attachments, ...newAttachments],
-      };
-    });
-
-    if (Object.keys(newPreviewUrls).length) {
-      setAttachmentPreviewUrls((prev) => ({ ...prev, ...newPreviewUrls }));
-    }
-    return created;
-  }, []);
-
-  const applyClashPatch = useCallback(
-    (
-      clashes: Clash[],
-      auditLogs: AuditLogEntry[],
-      statuses: Status[],
-      clashId: string,
-      patch: Partial<Record<ClashEditableField, string | null>>,
-      actorId: string,
-      nowIso: string
-    ): { clashes: Clash[]; auditLogs: AuditLogEntry[] } => {
-      const clash = clashes.find((c) => c.id === clashId);
-      if (!clash) return { clashes, auditLogs };
-
-      let updatedClash = clash;
-      const newEntries: AuditLogEntry[] = [];
-
-      const labelFor = (f: ClashEditableField, v: string | null) => {
-        if (v === null) return "-";
-        if (f === "statusId") return statuses.find((s) => s.id === v)?.nama ?? v;
-        return v;
-      };
-
-      (Object.entries(patch) as [ClashEditableField, string | null][]).forEach(([field, newValue]) => {
-        if (newValue === undefined) return;
-        const oldValueRaw = updatedClash[field];
-        if (oldValueRaw === newValue) return;
-
-        updatedClash = { ...updatedClash, [field]: newValue };
-        if (field === "statusId") {
-          const newStatus = statuses.find((s) => s.id === newValue);
-          updatedClash.closedAt = newStatus?.isClosedState ? nowIso : null;
-        }
-
-        newEntries.push({
-          id: genId(`audit-${clashId}`),
-          clashId,
-          actorId,
-          aksi: "updated",
-          field,
-          nilaiLama: labelFor(field, oldValueRaw as string | null),
-          nilaiBaru: labelFor(field, newValue),
-          createdAt: nowIso,
+      if (newAttachments.length > 0) {
+        setLocal((prev) => {
+          const base = prev ?? loadInitialLocal();
+          return { ...base, attachments: [...base.attachments, ...newAttachments] };
         });
-      });
+      }
+      if (Object.keys(newPreviewUrls).length) {
+        setAttachmentPreviewUrls((prev) => ({ ...prev, ...newPreviewUrls }));
+      }
 
-      if (newEntries.length === 0) return { clashes, auditLogs };
-
-      return {
-        clashes: clashes.map((c) => (c.id === clashId ? updatedClash : c)),
-        auditLogs: [...auditLogs, ...newEntries],
-      };
+      return created;
     },
-    []
+    [patchMaster, runWrite]
   );
 
   const updateClashField = useCallback(
-    (clashId: string, field: ClashEditableField, newValue: string | null, actorId: string) => {
-      setLocal((prev) => {
-        if (!prev) return prev;
-        const nowIso = new Date().toISOString();
-        const { clashes, auditLogs } = applyClashPatch(
-          prev.clashes,
-          prev.auditLogs,
-          masterRef.current?.statuses ?? [],
-          clashId,
-          { [field]: newValue },
-          actorId,
-          nowIso
-        );
-        if (clashes === prev.clashes) return prev;
-        return { ...prev, clashes, auditLogs };
-      });
+    async (
+      clashId: string,
+      field: ClashEditableField,
+      newValue: string | null,
+      _actorId: string
+    ): Promise<void> => {
+      // Actor is derived server-side from the JWT now; the parameter is kept
+      // so call sites (which still pass user.id for clarity) don't change.
+      void _actorId;
+      const patch: ClashFieldPatch = { [field]: newValue };
+      await runWrite(
+        () => apiPatch<ApiClash>(`/clashes/${clashId}`, patch),
+        (updated) =>
+          patchMaster((prev) => ({
+            ...prev,
+            clashes: prev.clashes.map((c) => (c.id === clashId ? toClash(updated) : c)),
+          }))
+      );
     },
-    [applyClashPatch]
+    [patchMaster, runWrite]
   );
 
   const bulkUpdateClashes = useCallback(
-    (
+    async (
       ids: string[],
       patch: Partial<Record<ClashEditableField, string | null>>,
-      actorId: string
-    ): { updated: number } => {
-      let updatedCount = 0;
-      setLocal((prev) => {
-        if (!prev) return prev;
-        const nowIso = new Date().toISOString();
-        let clashes = prev.clashes;
-        let auditLogs = prev.auditLogs;
-        for (const id of ids) {
-          const result = applyClashPatch(
-            clashes,
-            auditLogs,
-            masterRef.current?.statuses ?? [],
-            id,
-            patch,
-            actorId,
-            nowIso
-          );
-          if (result.clashes !== clashes) updatedCount++;
-          clashes = result.clashes;
-          auditLogs = result.auditLogs;
-        }
-        if (updatedCount === 0) return prev;
-        return { ...prev, clashes, auditLogs };
-      });
-      return { updated: updatedCount };
+      _actorId: string
+    ): Promise<{ updated: number }> => {
+      void _actorId;
+      const result = await runWrite(
+        () => apiPost<{ updated: number }>("/clashes/bulk", { ids, patch }),
+        () => {}
+      );
+
+      // Bulk can touch many rows at once — refetch the list rather than
+      // reconstructing every changed field (and its audit label) locally.
+      // Best-effort: the mutation above already succeeded, so a refetch
+      // failure only means the UI is stale until the next reload, not that
+      // the bulk update itself failed.
+      try {
+        const clashes = await apiGet<ApiClash[]>("/clashes");
+        patchMaster((prev) => ({ ...prev, clashes: clashes.map(toClash) }));
+      } catch (error) {
+        setSyncError(messageOf(error));
+      }
+
+      return result;
     },
-    [applyClashPatch]
+    [patchMaster, runWrite]
   );
 
-  const addComment = useCallback((clashId: string, authorId: string, isi: string) => {
-    setLocal((prev) => {
-      if (!prev) return prev;
-      const comment: Comment = {
-        id: genId(`comment-${clashId}`),
-        clashId,
-        authorId,
-        isi,
-        createdAt: new Date().toISOString(),
-      };
-      return { ...prev, comments: [...prev.comments, comment] };
-    });
-  }, []);
+  const addComment = useCallback(
+    async (clashId: string, _authorId: string, isi: string): Promise<void> => {
+      void _authorId;
+      await runWrite(
+        () => apiPost<ApiComment>(`/clashes/${clashId}/comments`, { content: isi }),
+        (created) =>
+          patchMaster((prev) => ({ ...prev, comments: [...prev.comments, toComment(created)] }))
+      );
+    },
+    [patchMaster, runWrite]
+  );
+
+  const loadClashDetail = useCallback(
+    async (clashId: string): Promise<void> => {
+      try {
+        const detail = await apiGet<ApiClashDetail>(`/clashes/${clashId}`);
+        const comments = detail.comments.map(toComment);
+        const auditLogs = detail.auditLogs.map(toAuditLog);
+        patchMaster((prev) => ({
+          ...prev,
+          clashes: mergeById(prev.clashes, [toClash(detail)]),
+          comments: mergeById(prev.comments, comments),
+          auditLogs: mergeById(prev.auditLogs, auditLogs),
+        }));
+        setSyncError(null);
+      } catch (error) {
+        setSyncError(messageOf(error));
+      }
+    },
+    [patchMaster]
+  );
 
   // --- Project --------------------------------------------------------------
 
@@ -719,9 +659,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       zones: master?.zones ?? [],
       statuses: master?.statuses ?? [],
       priorities: master?.priorities ?? [],
-      clashes: local?.clashes ?? [],
-      comments: local?.comments ?? [],
-      auditLogs: local?.auditLogs ?? [],
+      clashes: master?.clashes ?? [],
+      comments: master?.comments ?? [],
+      auditLogs: master?.auditLogs ?? [],
       attachments: local?.attachments ?? [],
       notificationPreferences: local?.notificationPreferences ?? [],
       isLoading: local === null || !masterResolved,
@@ -729,6 +669,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       attachmentPreviewUrls,
       reloadMasterData,
       clearMasterData,
+      loadClashDetail,
       createClash,
       updateClashField,
       bulkUpdateClashes,
@@ -757,6 +698,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       attachmentPreviewUrls,
       reloadMasterData,
       clearMasterData,
+      loadClashDetail,
       createClash,
       updateClashField,
       bulkUpdateClashes,

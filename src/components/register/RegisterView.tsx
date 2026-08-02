@@ -615,9 +615,14 @@ export function RegisterView() {
           priorities={priorities.filter((p) => p.isActive)}
           assignableUsers={assignableUsers}
           onClear={() => setSelectedIds(new Set())}
-          onApply={(patch) => {
-            bulkUpdateClashes(Array.from(selectedIds), patch, user.id);
-            setSelectedIds(new Set());
+          onApply={async (patch) => {
+            try {
+              await bulkUpdateClashes(Array.from(selectedIds), patch, user.id);
+              setSelectedIds(new Set());
+            } catch {
+              // Failure is already surfaced via the syncError banner
+              // (AppShell); keep the selection so the user can retry.
+            }
           }}
         />
       )}

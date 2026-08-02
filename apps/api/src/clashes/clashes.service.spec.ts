@@ -1,0 +1,309 @@
+import { ForbiddenException } from '@nestjs/common';
+import { Role } from '@prisma/client';
+import { ClashesService } from './clashes.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { AuthUser } from '../auth/auth.types';
+
+const PROJECT = { id: 'proj-1', code: 'MCA', createdAt: new Date('2026-01-01') };
+
+const STATUSES = [
+  { id: 'st-open', name: 'Open', sequence: 1, isClosedState: false },
+  { id: 'st-inprogress', name: 'In Progress', sequence: 2, isClosedState: false },
+  { id: 'st-resolved', name: 'Resolved', sequence: 3, isClosedState: false },
+  { id: 'st-closed', name: 'Closed', sequence: 4, isClosedState: true },
+];
+
+const PRIORITIES = [
+  { id: 'pr-low', name: 'Low', weight: 1 },
+  { id: 'pr-high', name: 'High', weight: 3 },
+];
+
+const USERS = [
+  { id: 'u-eng', name: 'Dimas Prasetyo', role: Role.ENGINEER },
+  { id: 'u-eng2', name: 'Rizky Ananda', role: Role.ENGINEER },
+  { id: 'u-coord', name: 'Siti Rahmawati', role: Role.COORDINATOR },
+];
+
+const engineer: AuthUser = { id: 'u-eng', email: 'engineer@clashhub.dev', role: Role.ENGINEER };
+const otherEngineer: AuthUser = { id: 'u-eng2', email: 'rizky@clashhub.dev', role: Role.ENGINEER };
+const coordinator: AuthUser = { id: 'u-coord', email: 'coordinator@clashhub.dev', role: Role.COORDINATOR };
+
+function baseClash(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 'clash-1',
+    uniqueCode: 'MCA-ARS-0001',
+    projectId: PROJECT.id,
+    title: 'Bentrok pipa',
+    description: 'Deskripsi',
+    disciplineId: 'disc-ars',
+    zoneId: 'zone-1',
+    statusId: 'st-open',
+    priorityId: 'pr-low',
+    reporterId: 'u-eng',
+    assigneeId: 'u-eng' as string | null,
+    dueDate: null as Date | null,
+    createdAt: new Date('2026-07-01'),
+    closedAt: null as Date | null,
+    ...overrides,
+  };
+}
+
+/**
+ * A hand-rolled Prisma mock, in the same spirit as auth.service.spec.ts:
+ * findUnique/findFirst resolve from the fixed lookup tables above, count and
+ * $transaction are stubbed just enough for each test's path.
+ */
+function makePrisma(clash: ReturnType<typeof baseClash> | null) {
+  const clashRecord = clash;
+
+  const status = {
+    findUnique: jest.fn(({ where: { id } }: { where: { id: string } }) =>
+      Promise.resolve(STATUSES.find((s) => s.id === id) ?? null),
+    ),
+    findFirst: jest.fn(() => Promise.resolve([...STATUSES].sort((a, b) => a.sequence - b.sequence)[0])),
+  };
+  const priority = {
+    findUnique: jest.fn(({ where: { id } }: { where: { id: string } }) =>
+      Promise.resolve(PRIORITIES.find((p) => p.id === id) ?? null),
+    ),
+  };
+  const user = {
+    findUnique: jest.fn(({ where: { id } }: { where: { id: string } }) =>
+      Promise.resolve(USERS.find((u) => u.id === id) ?? null),
+    ),
+  };
+  const clashDelegate = {
+    findUnique: jest.fn(() => Promise.resolve(clashRecord)),
+    count: jest.fn(() => Promise.resolve(0)),
+    update: jest.fn(({ where, data }: { where: { id: string }; data: Record<string, unknown> }) =>
+      Promise.resolve({ ...clashRecord, ...data, id: where.id }),
+    ),
+    create: jest.fn(),
+  };
+  const auditLog = {
+    create: jest.fn(),
+    createMany: jest.fn(),
+  };
+  const project = {
+    findFirst: jest.fn(() => Promise.resolve(PROJECT)),
+  };
+
+  const prisma = {
+    project,
+    status,
+    priority,
+    user,
+    clash: clashDelegate,
+    auditLog,
+    $transaction: jest.fn((fn: (tx: unknown) => Promise<unknown>) =>
+      fn({ clash: clashDelegate, auditLog }),
+    ),
+  } as unknown as PrismaService;
+
+  return { prisma, clashDelegate, auditLog };
+}
+
+describe('ClashesService.update — RBAC', () => {
+  it('rejects an Engineer editing a clash they neither reported nor are assigned to', async () => {
+    const { prisma } = makePrisma(baseClash({ assigneeId: null, reporterId: 'u-coord' }));
+    const service = new ClashesService(prisma);
+
+    await expect(
+      service.update('clash-1', { statusId: 'st-inprogress' }, otherEngineer),
+    ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('allows an Engineer to edit a clash assigned to them', async () => {
+    const { prisma, clashDelegate } = makePrisma(baseClash({ assigneeId: 'u-eng' }));
+    const service = new ClashesService(prisma);
+
+    await service.update('clash-1', { statusId: 'st-inprogress' }, engineer);
+    expect(clashDelegate.update).toHaveBeenCalled();
+  });
+
+  it('allows an Engineer to edit a clash they reported, even unassigned', async () => {
+    const { prisma, clashDelegate } = makePrisma(
+      baseClash({ assigneeId: null, reporterId: 'u-eng' }),
+    );
+    const service = new ClashesService(prisma);
+
+    await service.update('clash-1', { statusId: 'st-inprogress' }, engineer);
+    expect(clashDelegate.update).toHaveBeenCalled();
+  });
+
+  it('lets Coordinator edit any clash regardless of assignment', async () => {
+    const { prisma, clashDelegate } = makePrisma(
+      baseClash({ assigneeId: 'u-eng', reporterId: 'u-eng' }),
+    );
+    const service = new ClashesService(prisma);
+
+    await service.update('clash-1', { priorityId: 'pr-high' }, coordinator);
+    expect(clashDelegate.update).toHaveBeenCalled();
+  });
+});
+
+describe('ClashesService.update — status transitions', () => {
+  it('lets an assigned Engineer move one step forward', async () => {
+    const { prisma, clashDelegate } = makePrisma(baseClash({ statusId: 'st-open' }));
+    const service = new ClashesService(prisma);
+
+    await service.update('clash-1', { statusId: 'st-inprogress' }, engineer);
+    expect(clashDelegate.update).toHaveBeenCalled();
+  });
+
+  it('rejects an Engineer skipping a status two steps forward', async () => {
+    const { prisma } = makePrisma(baseClash({ statusId: 'st-open' }));
+    const service = new ClashesService(prisma);
+
+    await expect(
+      service.update('clash-1', { statusId: 'st-resolved' }, engineer),
+    ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('rejects an Engineer closing a clash even one step forward', async () => {
+    const { prisma } = makePrisma(baseClash({ statusId: 'st-resolved' }));
+    const service = new ClashesService(prisma);
+
+    await expect(
+      service.update('clash-1', { statusId: 'st-closed' }, engineer),
+    ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('rejects an Engineer reassigning, changing priority, or due date', async () => {
+    const { prisma } = makePrisma(baseClash());
+    const service = new ClashesService(prisma);
+
+    await expect(
+      service.update('clash-1', { priorityId: 'pr-high' }, engineer),
+    ).rejects.toThrow(ForbiddenException);
+    await expect(
+      service.update('clash-1', { assigneeId: 'u-eng2' }, engineer),
+    ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('lets Coordinator move to any other status, including closing it', async () => {
+    const { prisma, clashDelegate } = makePrisma(baseClash({ statusId: 'st-open' }));
+    const service = new ClashesService(prisma);
+
+    await service.update('clash-1', { statusId: 'st-closed' }, coordinator);
+    expect(clashDelegate.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ statusId: 'st-closed', closedAt: expect.any(Date) }),
+      }),
+    );
+  });
+});
+
+describe('ClashesService.update — closedAt and audit log', () => {
+  it('clears closedAt when moving out of a closed state', async () => {
+    const { prisma, clashDelegate } = makePrisma(
+      baseClash({ statusId: 'st-closed', closedAt: new Date('2026-07-05') }),
+    );
+    const service = new ClashesService(prisma);
+
+    await service.update('clash-1', { statusId: 'st-open' }, coordinator);
+    expect(clashDelegate.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ statusId: 'st-open', closedAt: null }) }),
+    );
+  });
+
+  it('writes one audit row per field that actually changed, translated to names', async () => {
+    const { prisma, auditLog } = makePrisma(
+      baseClash({ statusId: 'st-open', priorityId: 'pr-low', assigneeId: null }),
+    );
+    const service = new ClashesService(prisma);
+
+    await service.update(
+      'clash-1',
+      { statusId: 'st-inprogress', priorityId: 'pr-high', assigneeId: 'u-eng' },
+      coordinator,
+    );
+
+    expect(auditLog.createMany).toHaveBeenCalledTimes(1);
+    const rows = (auditLog.createMany as jest.Mock).mock.calls[0][0].data as Array<{
+      field: string;
+      oldValue: string;
+      newValue: string;
+    }>;
+    expect(rows).toHaveLength(3);
+    expect(rows.find((r) => r.field === 'statusId')).toMatchObject({
+      oldValue: 'Open',
+      newValue: 'In Progress',
+    });
+    expect(rows.find((r) => r.field === 'priorityId')).toMatchObject({
+      oldValue: 'Low',
+      newValue: 'High',
+    });
+    expect(rows.find((r) => r.field === 'assigneeId')).toMatchObject({
+      oldValue: '-',
+      newValue: 'Dimas Prasetyo',
+    });
+  });
+
+  it('writes no audit row and does not update when the patch value equals the current value', async () => {
+    const { prisma, clashDelegate, auditLog } = makePrisma(baseClash({ statusId: 'st-open' }));
+    const service = new ClashesService(prisma);
+
+    const result = await service.update('clash-1', { statusId: 'st-open' }, coordinator);
+
+    expect(clashDelegate.update).not.toHaveBeenCalled();
+    expect(auditLog.createMany).not.toHaveBeenCalled();
+    expect(result.statusId).toBe('st-open');
+  });
+});
+
+describe('ClashesService.bulkUpdate', () => {
+  it('counts only the clashes that actually changed, skipping missing ids', async () => {
+    const { prisma, clashDelegate } = makePrisma(baseClash({ statusId: 'st-open' }));
+    // First lookup returns the clash, second (missing id) returns null.
+    (clashDelegate.findUnique as jest.Mock)
+      .mockResolvedValueOnce(baseClash({ id: 'clash-1', statusId: 'st-open' }))
+      .mockResolvedValueOnce(null);
+    const service = new ClashesService(prisma);
+
+    const result = await service.bulkUpdate(
+      { ids: ['clash-1', 'clash-missing'], patch: { statusId: 'st-inprogress' } },
+      coordinator,
+    );
+
+    expect(result).toEqual({ updated: 1 });
+  });
+});
+
+describe('ClashesService.create', () => {
+  it('builds a uniqueCode as PROJECT-DISCIPLINE-NNNN and writes a "created" audit row', async () => {
+    const { prisma, clashDelegate, auditLog } = makePrisma(null);
+    const discipline = { id: 'disc-ars', projectId: PROJECT.id, code: 'ARS', name: 'Arsitektur' };
+    const zone = { id: 'zone-1', projectId: PROJECT.id, name: 'Zona A', level: 'Lantai 1' };
+    (prisma as unknown as { discipline: unknown }).discipline = {
+      findUnique: jest.fn(() => Promise.resolve(discipline)),
+    };
+    (prisma as unknown as { zone: unknown }).zone = {
+      findUnique: jest.fn(() => Promise.resolve(zone)),
+    };
+    (clashDelegate.count as jest.Mock).mockResolvedValue(4);
+    (clashDelegate.create as jest.Mock).mockImplementation(
+      ({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'clash-new', ...data }),
+    );
+
+    const service = new ClashesService(prisma);
+    const created = (await service.create(
+      {
+        title: 'Judul',
+        description: 'Deskripsi',
+        disciplineId: 'disc-ars',
+        zoneId: 'zone-1',
+        priorityId: 'pr-low',
+      },
+      engineer,
+    )) as { uniqueCode: string; reporterId: string };
+
+    expect(created.uniqueCode).toBe('MCA-ARS-0005');
+    expect(created.reporterId).toBe('u-eng');
+    expect(auditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ clashId: 'clash-new', action: 'created', actorId: 'u-eng' }),
+      }),
+    );
+  });
+});
