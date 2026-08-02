@@ -88,7 +88,11 @@ export default function AdminMasterDataPage() {
             onSubmit={(e) => {
               e.preventDefault();
               if (!newDiscKode.trim() || !newDiscNama.trim()) return;
-              createDiscipline({ kode: newDiscKode.trim().toUpperCase(), nama: newDiscNama.trim() });
+              // Failures land in syncError, which AppShell renders as a banner.
+              createDiscipline({
+                kode: newDiscKode.trim().toUpperCase(),
+                nama: newDiscNama.trim(),
+              }).catch(() => {});
               setNewDiscKode("");
               setNewDiscNama("");
             }}
@@ -169,7 +173,7 @@ export default function AdminMasterDataPage() {
             onSubmit={(e) => {
               e.preventDefault();
               if (!newZoneLevel.trim() || !newZoneNama.trim()) return;
-              createZone({ level: newZoneLevel.trim(), nama: newZoneNama.trim() });
+              createZone({ level: newZoneLevel.trim(), nama: newZoneNama.trim() }).catch(() => {});
               setNewZoneLevel("");
               setNewZoneNama("");
             }}
@@ -250,7 +254,7 @@ export default function AdminMasterDataPage() {
             onSubmit={(e) => {
               e.preventDefault();
               if (!newPrioNama.trim()) return;
-              createPriority({ nama: newPrioNama.trim(), bobot: newPrioBobot });
+              createPriority({ nama: newPrioNama.trim(), bobot: newPrioBobot }).catch(() => {});
               setNewPrioNama("");
               setNewPrioBobot(1);
             }}

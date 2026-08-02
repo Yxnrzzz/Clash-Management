@@ -28,7 +28,7 @@ export default function AdminUsersPage() {
     return <div className="p-8 text-sm text-zinc-500">Memuat…</div>;
   }
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const result = userSchema.safeParse(values);
     if (!result.success) {
@@ -44,7 +44,16 @@ export default function AdminUsersPage() {
       return;
     }
     setErrors({});
-    createUser(result.data);
+    try {
+      await createUser(result.data);
+    } catch (error) {
+      // The server checks uniqueness too, and it is the authority — surface its
+      // message on the email field rather than silently dropping the failure.
+      setErrors({
+        email: error instanceof Error ? error.message : "Gagal membuat user.",
+      });
+      return;
+    }
     setValues({ nama: "", email: "", peran: "Engineer" });
     setFormOpen(false);
   }

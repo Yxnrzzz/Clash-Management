@@ -1,10 +1,12 @@
 # ClashHub — Handoff Progress
 
-**Tanggal:** 2 Agustus 2026 (update ke-2)
-**Status:** Frontend selesai (seluruh deliverable frontend dari Sprint Plan). Backend belum ada sama sekali.
+**Tanggal:** 2 Agustus 2026 (update ke-3)
+**Status:** Frontend selesai. **Sprint 1 backend selesai dan sudah tersambung**: auth JWT + argon2, RBAC, dan CRUD user/proyek/master-data berjalan di NestJS + PostgreSQL. Clash, komentar, audit log, lampiran, dan preferensi notifikasi **masih di `localStorage`** (fase hybrid).
 **Lokasi proyek:** `D:\WebApp`
 
 Dokumen ini untuk melanjutkan pengerjaan di sesi/chat baru. Baca ini dulu sebelum menulis kode.
+
+> **Menjalankan sekarang butuh DUA server:** API di `localhost:3001` (`npm --prefix apps/api run start:dev`) dan web di `localhost:3000` (`npm run dev`). Keduanya terdaftar di `.claude/launch.json`. Tanpa API hidup, login gagal dan seluruh master data kosong.
 
 ---
 
@@ -18,21 +20,30 @@ ClashHub adalah web platform manajemen clash & issue koordinasi BIM. Dokumen sum
 | `ClashHub_ERD.md` | Entity Relationship Diagram (PostgreSQL) |
 | `ClashHub_Sprint_Plan.md` | 12 sprint (0–11) + prompt siap-pakai per sprint |
 
-**Update sejak handoff pertama:** seluruh sisa deliverable frontend sudah dibangun — Admin panel (User/Proyek/Master Data), bulk update + export Excel/PDF di Register, Pengaturan Notifikasi, dan wizard Import CSV. Fondasi data juga di-refactor total: master data (user, disiplin, zona, status, prioritas) sekarang **mutable** dan tersambung ke Admin panel, bukan konstanta statis lagi.
+**Update sejak handoff ke-2 (Sprint 1):** backend NestJS di `apps/api/` sudah jadi backend resmi dan **tersambung ke frontend**. Yang dibangun: AuthModule (JWT access 15m + refresh 7d di cookie `httpOnly`, password argon2id), `RolesGuard` + `@Roles()` + `ProjectMemberGuard`, dan modul `users`/`projects`/`master-data`. Di sisi frontend ditambahkan lapisan `src/lib/api/`, dan `auth-context.tsx` + `data-context.tsx` sekarang bicara ke API — **tanpa mengubah satu pun tipe domain atau komponen** (lihat §5).
 
-Catatan penting: ada folder `apps/api/` di root repo (NestJS scaffold) yang **bukan buatan sesi frontend ini** — sudah ada sebelum sesi ini dimulai (kemungkinan hasil sesi lain atau inisiatif user sendiri mengikuti Sprint 0 dari Sprint Plan). Proyek Next.js ini (`tsconfig.json`, `eslint.config.mjs`) sudah dikonfigurasi untuk **mengecualikan** `apps/**` dari type-check dan lint-nya sendiri, karena itu paket terpisah dengan tsconfig/lint sendiri. Jangan gabungkan kode frontend ke situ tanpa memeriksa dulu apa isinya.
+Sebelumnya (handoff ke-2): seluruh deliverable frontend dibangun — Admin panel, bulk update + export Excel/PDF, Pengaturan Notifikasi, wizard Import CSV, dan master data yang mutable.
 
 ---
 
 ## 2. Tech stack aktual
 
+**Frontend** (root, port 3000)
 ```
 Next.js 16.2.12 (App Router, Turbopack)  ·  React 19.2.4  ·  TypeScript strict
 Tailwind CSS 4  ·  TanStack Table 8  ·  Recharts 3.10  ·  Zod 4
 xlsx (SheetJS)  ·  jspdf + jspdf-autotable
 ```
 
-Backend yang direncanakan di Sprint Plan (**NestJS + PostgreSQL + Prisma + Redis + BullMQ**) **belum ada di `src/`** — hanya ada scaffold terpisah di `apps/api/` yang tidak tersambung ke frontend ini sama sekali (frontend masih 100% mock data).
+**Backend** (`apps/api/`, port 3001, prefix `/api`)
+```
+NestJS 11  ·  Prisma 6  ·  PostgreSQL 16 (Docker)  ·  passport-jwt + @nestjs/jwt
+@node-rs/argon2  ·  class-validator  ·  Jest
+```
+
+Redis 7 ada di `docker-compose.yml` tapi **belum dipakai** — BullMQ baru relevan di Sprint 5 (notifikasi async).
+
+`@node-rs/argon2` dipakai, bukan paket `argon2`, karena mendistribusikan binary prebuilt sehingga tidak butuh node-gyp/Build Tools di Windows.
 
 ---
 
@@ -68,11 +79,17 @@ src/
 │       ├── ChartPieces.tsx
 │       └── viz-tokens.ts
 └── lib/
-    ├── types.ts                 tipe domain (Discipline/Zone/Priority kini punya isActive)
-    ├── mock-data.ts              INITIAL_* (seed awal) + generateSeedData (clash dummy)
-    ├── data-context.tsx          SATU-SATUNYA sumber state: clash, master data, komentar,
-    │                             audit log, preferensi notifikasi + semua fungsi CRUD/mutasi
-    ├── auth-context.tsx          mock auth — user diturunkan dari daftar user LIVE
+    ├── api/                      LAPISAN BARU (Sprint 1)
+    │   ├── client.ts             apiFetch/apiGet/apiPost/apiPatch, login, logout,
+    │   │                         restoreSession. Access token disimpan DI MEMORI
+    │   │                         (bukan localStorage). Retry sekali lewat /auth/refresh saat 401.
+    │   ├── mappers.ts            SATU-SATUNYA tempat terjemahan Inggris ↔ Indonesia
+    │   └── types.ts              bentuk respons API mentah (name/role/weight/sequence)
+    ├── types.ts                 tipe domain — TIDAK BERUBAH di Sprint 1
+    ├── mock-data.ts              INITIAL_* + generateSeedData (clash dummy). INITIAL_* kini
+    │                             hanya dipakai generateSeedData; master data datang dari API.
+    ├── data-context.tsx          HYBRID: master data dari API, clash dkk dari localStorage
+    ├── auth-context.tsx          auth ASLI — login/refresh/logout ke API
     ├── use-master-data.ts        hook lookup (disciplineById dst.) terikat ke array live
     ├── use-require-auth.ts       guard route (login wajib)
     ├── use-require-admin.ts      guard route (Admin-only, redirect ke /register)
@@ -80,15 +97,26 @@ src/
     ├── dashboard-metrics.ts       agregasi KPI/tren/sebaran (nerima master data sbg parameter)
     ├── export.ts                  exportClashesToExcel, exportClashesToPdf
     └── csv.ts                     parser CSV minimal untuk wizard import
+
+apps/api/src/
+├── main.ts                       setGlobalPrefix('api') + cookieParser + ValidationPipe
+├── app.module.ts                 JwtAuthGuard & RolesGuard didaftarkan sbg APP_GUARD global
+├── auth/                         login/refresh/logout/me, JwtStrategy, AuthService
+├── common/
+│   ├── decorators/               @Public(), @Roles(), @CurrentUser()
+│   ├── guards/                   JwtAuthGuard, RolesGuard, ProjectMemberGuard
+│   └── user.view.ts              serializer user (passwordHash tidak pernah ikut)
+├── users/  ·  projects/  ·  master-data/     controller + service + dto
+└── prisma/                       PrismaService
 ```
 
-**localStorage keys:** `clashhub-auth-user-id`, `clashhub-data-v2` (naik dari v1 — skema lama tidak kompatibel, browser lama otomatis re-seed).
+**localStorage key:** `clashhub-data-v3` (naik dari v2 — isinya menyusut, master data pindah ke API). Key `clashhub-auth-user-id` **sudah tidak dipakai** — sesi sekarang bersandar pada cookie `httpOnly` `clashhub_refresh`.
 
 ---
 
 ## 4. Akun demo
 
-Password bebas, minimal 4 karakter (ini mock — tidak ada validasi password asli).
+Password untuk semua akun: **`demo1234`** — sekarang password asli, di-hash argon2id di database. Password salah ditolak 401.
 
 | Peran | Email |
 |---|---|
@@ -99,33 +127,51 @@ Password bebas, minimal 4 karakter (ini mock — tidak ada validasi password asl
 
 User tambahan: `rizky@clashhub.dev` (Engineer), `putri@clashhub.dev` (Coordinator).
 
-Admin bisa membuat user baru dari `/admin/users` dan user itu **langsung bisa login** (sudah diverifikasi end-to-end).
+Admin bisa membuat user baru dari `/admin/users`; user itu tersimpan di database dengan password default `demo1234` dan **langsung bisa login** (sudah diverifikasi end-to-end).
 
 **Reset data demo:**
 ```js
-localStorage.clear(); location.reload();
+localStorage.clear(); location.reload();   // hanya clash/komentar/audit/lampiran
 ```
+Master data & user ada di database — untuk mengembalikannya jalankan `npx prisma db seed` di `apps/api` (idempoten, memakai `upsert`).
 
 ---
 
 ## 5. Arsitektur data — baca ini sebelum mengubah apa pun
 
-### Master data sekarang mutable
+### Fase HYBRID — separuh dari API, separuh dari localStorage
 
-Sebelumnya `DISCIPLINES`, `ZONES`, `STATUSES`, `PRIORITIES`, `USERS`, `PROJECT` adalah konstanta statis yang diimpor langsung dari `mock-data.ts`. **Ini sudah berubah total.** Sekarang:
+Ini hal terpenting yang harus dipahami sebelum menyentuh `data-context.tsx`:
 
-- `mock-data.ts` hanya mengekspor `INITIAL_*` — nilai seed yang dipakai SEKALI saat `data-context.tsx` pertama kali membuat state (atau saat localStorage kosong).
-- Setelah itu, master data hidup sebagai state di `DataProvider` (`data-context.tsx`), bisa diubah lewat CRUD functions (`createUser`, `updateDiscipline`, `toggleZoneActive`, dst.), dan dipersist ke `localStorage`.
-- Untuk MEMBACA master data di komponen: pakai `useData()` (dapat array live: `disciplines`, `zones`, `statuses`, `priorities`, `users`, `project`) atau `useMasterDataLookups()` dari `use-master-data.ts` (dapat closure lookup: `disciplineById(id)`, `statusById(id)`, dst. — sudah terikat ke array live via `useMemo`).
-- **Jangan pernah** import `DISCIPLINES`/`ZONES`/dst. langsung dari `mock-data.ts` di komponen manapun — itu snapshot beku saat build, bukan data yang bisa berubah oleh Admin.
+| Dari API (PostgreSQL) | Masih di `localStorage` |
+|---|---|
+| `project`, `users`, `disciplines`, `zones`, `statuses`, `priorities` | `clashes`, `comments`, `auditLogs`, `attachments`, `notificationPreferences` |
 
-### Provider order penting
+**Yang membuat kedua paruh ini nyambung:** `apps/api/prisma/seed.ts` sengaja memakai **id eksplisit yang sama persis dengan `mock-data.ts`** (`proj-1`, `u-eng`, `disc-ars`, `st-open`, `pr-low`, `zone-1`, …), bukan uuid acak. Clash mock menyimpan `disciplineId: "disc-ars"`; kalau id di database acak, seluruh 87 clash jadi orphan dan Register + Dashboard ikut kosong. **Jangan pernah mengganti id seed itu dengan uuid selama clash masih di localStorage.**
 
-`layout.tsx`: `DataProvider` membungkus `AuthProvider` (bukan sebaliknya). Ini disengaja — `auth-context.tsx` memanggil `useData()` untuk mendapat daftar user LIVE, supaya:
+### Master data dibaca lewat useData(), bukan konstanta
+
+- Untuk MEMBACA master data di komponen: pakai `useData()` (array live: `disciplines`, `zones`, `statuses`, `priorities`, `users`, `project`) atau `useMasterDataLookups()` dari `use-master-data.ts`.
+- **Jangan pernah** import `INITIAL_DISCIPLINES`/`INITIAL_ZONES`/dst. langsung dari `mock-data.ts` di komponen manapun — sekarang itu cuma dipakai `generateSeedData()` untuk clash dummy.
+
+### Provider order penting (dan alurnya sekarang lebih halus)
+
+`layout.tsx`: `DataProvider` membungkus `AuthProvider` (bukan sebaliknya) — **tetap seperti sebelumnya, jangan dibalik**.
+
+Karena semua endpoint master data butuh token, urutan bootstrap-nya jadi:
+1. `AuthProvider` mount → `restoreSession()` (POST `/api/auth/refresh` pakai cookie `httpOnly`).
+2. Kalau ada sesi → panggil `reloadMasterData()` milik DataContext. Kalau tidak → `clearMasterData()`.
+3. `DataContext.isLoading` baru `false` setelah salah satu dari keduanya dipanggil.
+
+Jadi arah ketergantungannya: **auth memanggil data**, sesuai nesting provider-nya. Perilaku lama tetap dipertahankan:
 1. User yang baru dibuat Admin bisa langsung login.
-2. Kalau Admin menonaktifkan user yang sedang login, sesinya otomatis ter-logout (`user` di-derive dari `users.find(...).isActive`, bukan disimpan sebagai object statis).
+2. Kalau Admin menonaktifkan user yang sedang login, sesinya otomatis ter-logout (`user` di-derive dari `users.find(...).isActive`). Server juga menolak refresh untuk akun nonaktif, jadi penegakannya sekarang di dua sisi.
 
-Kalau membalik urutan ini lagi, `useAuth()` akan crash karena `useData()` dipanggil di luar `DataProvider`.
+### Penulisan master data: optimistic + debounce 500ms
+
+Halaman `/admin/master-data` memanggil `updateDiscipline(...)` dari `onChange` **setiap ketikan**. Kalau tiap keystroke jadi satu PATCH, itu badai request. Polanya sekarang: state lokal diperbarui seketika (optimistic), PATCH-nya di-coalesce dan ditunda 500ms (`PATCH_DEBOUNCE_MS`). Sudah diverifikasi: mengetik 19 karakter → **1** PATCH.
+
+Kalau PATCH gagal, `data-context` menaruh pesannya di `syncError` dan menarik ulang data dari server (membatalkan perubahan optimistic). `AppShell` menampilkan `syncError` sebagai banner merah — jangan dihapus, itu satu-satunya cara kegagalan tulis terlihat user.
 
 ### Soft-delete, bukan hard-delete
 
@@ -149,7 +195,9 @@ Kalau membalik urutan ini lagi, `useAuth()` akan crash karena `useData()` dipang
 | **Management** | ✅ baca-saja | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
 | **Admin** | ✅ | ✅ | ✅ | ✅ | Penuh | ✅ | ✅ | ✅ | ✅ |
 
-Aturan terpusat: `src/lib/lookup.ts` (`canEditClash`, `canComment`) + `src/lib/use-master-data.ts` (`allowedStatusTransitions`) + guard `use-require-auth.ts`/`use-require-admin.ts`.
+Aturan terpusat di frontend: `src/lib/lookup.ts` (`canEditClash`, `canComment`) + `src/lib/use-master-data.ts` (`allowedStatusTransitions`) + guard `use-require-auth.ts`/`use-require-admin.ts`.
+
+**Sejak Sprint 1, RBAC juga ditegakkan di server** — guard frontend kini sekadar UX, bukan satu-satunya pertahanan. `RolesGuard` di NestJS menolak dengan 403, dan `JwtAuthGuard` global menolak request tanpa token dengan 401. Tabel endpoint lengkap ada di `apps/api/README.md`.
 
 ---
 
@@ -157,26 +205,35 @@ Aturan terpusat: `src/lib/lookup.ts` (`canEditClash`, `canComment`) + `src/lib/u
 
 | Sprint | Fokus | Status | Catatan |
 |---|---|---|---|
-| 0 | Fondasi backend | ❌ Belum (frontend only) | `apps/api/` ada tapi tidak tersambung ke frontend ini |
-| 1 | Auth, RBAC, Administrasi | 🟢 Frontend selesai | Halaman Admin lengkap (User/Proyek/Master Data); auth masih mock (tanpa JWT/hashing — butuh backend) |
-| 2 | Input clash + lampiran | 🟢 Selesai | Lampiran kini File asli dgn preview real (bukan cuma metadata lagi) |
-| 3 | Clash Register | ✅ Selesai | |
-| 4 | Detail, komentar, audit, triase | ✅ Selesai | |
-| 5 | Notifikasi email async | ❌ Belum (backend-only) | |
-| 6 | Dashboard Manajemen | ✅ Selesai | |
-| 7 | Export Excel/PDF + Bulk update | ✅ Selesai | Export client-side (SheetJS + jsPDF), bulk update dgn modal konfirmasi |
-| 8 | WhatsApp + preferensi kanal | 🟢 Frontend selesai | `/settings/notifications` lengkap dgn validasi E.164; pengiriman WA asli butuh backend |
-| 9 | Bulk import CSV/XML | 🟢 Frontend selesai (CSV saja) | Wizard 3 langkah penuh, tervalidasi end-to-end. XML tidak diimplementasikan (scope cut — CSV cukup mewakili pola importnya) |
-| 10 | Fitur AI (opsional) | ❌ Belum | Butuh eval harness + AI asli — tidak masuk akal untuk di-fake |
-| 11 | Hardening, performa, deploy | ❌ Belum | Bukan pekerjaan frontend |
+| 0 | Fondasi backend | ✅ Selesai | NestJS + Prisma + PostgreSQL, 2 migrasi ter-apply, seed idempoten, `/api/health` |
+| 1 | Auth, RBAC, Administrasi | ✅ Selesai | JWT + argon2id, RolesGuard/ProjectMemberGuard, CRUD user/proyek/master-data, **frontend tersambung**, 12 unit test lulus |
+| 2 | Input clash + lampiran | 🟢 Frontend selesai | Clash masih di localStorage; lampiran belum punya object storage |
+| 3 | Clash Register | 🟢 Frontend selesai | Data clash belum dari DB |
+| 4 | Detail, komentar, audit, triase | 🟢 Frontend selesai | Idem |
+| 5 | Notifikasi email async | ❌ Belum | Butuh Redis + BullMQ (Redis ada di compose, belum dijalankan) |
+| 6 | Dashboard Manajemen | 🟢 Frontend selesai | Agregasi masih di client dari data localStorage |
+| 7 | Export Excel/PDF + Bulk update | ✅ Selesai | Export client-side (SheetJS + jsPDF) |
+| 8 | WhatsApp + preferensi kanal | 🟢 Frontend selesai | Kolom `whatsappNumber` sudah ada di skema; preferensi masih di localStorage |
+| 9 | Bulk import CSV/XML | 🟢 Frontend selesai (CSV saja) | XML di-scope-cut |
+| 10 | Fitur AI (opsional) | ❌ Belum | Butuh eval harness + AI asli |
+| 11 | Hardening, performa, deploy | ❌ Belum | |
 
-**Kesimpulan: semua yang punya deliverable frontend sudah selesai.** Sisa yang belum murni backend (0, 5, 11) atau butuh keputusan produk/API asli (10).
+**Langkah berikutnya yang paling masuk akal: `ClashesModule`** (clash + komentar + audit log + lampiran) lalu pindahkan lima key `localStorage` yang tersisa ke API. Polanya sudah terbukti di Sprint 1 — tinggal diulang. Setelah itu `localStorage` bisa dihapus sepenuhnya dan `mock-data.ts` ikut dibuang.
 
 ---
 
-## 8. Bug yang ditemukan & diperbaiki selama sesi ini
+## 8. Bug & jebakan yang ditemukan (lintas sesi)
 
-Dicatat supaya tidak terulang kalau menyentuh file yang sama:
+Dicatat supaya tidak terulang kalau menyentuh file yang sama.
+
+**Sesi Sprint 1 (integrasi backend):**
+
+0a. **PATCH per keystroke.** `/admin/master-data` memanggil `updateDiscipline` dari `onChange`, jadi menyambungkannya langsung ke API berarti satu request per huruf. Diperbaiki dengan optimistic update + debounce 500ms di `data-context.tsx` (lihat §5).
+0b. **Daftar akun demo di `/login` jadi kosong.** Kartu itu dulu membaca `users` dari `useData()`; setelah user datang dari API, sebelum login daftarnya kosong. Diperbaiki: `DEMO_ACCOUNTS` ditulis statis di `login/page.tsx`.
+0c. **Seed lama ber-UUID membuat proyek salah.** `projects/current` memakai `findFirst({ orderBy: createdAt asc })`, sehingga selama baris seed Sprint 0 (uuid, `PMW-01`) masih ada, sidebar menampilkan proyek yang salah dan chip filter jadi ganda. Baris-baris basi itu sudah dihapus; seed sekarang idempoten dan ber-id tetap.
+0d. **`expiresIn` dari `ConfigService` tidak lolos tipe.** `@nestjs/jwt` mengetatkan `expiresIn` ke `number | StringValue`, sedangkan `config.get<string>()` mengembalikan `string`. Ditangani lewat helper `ttl()` di `auth.service.ts` — jangan diganti jadi `any`.
+
+**Sesi frontend sebelumnya:**
 
 1. **`RegisterView.tsx`** — filter memicu `router.replace()` Next.js di setiap klik → request RSC ke server tiap interaksi, terasa lemot. Diperbaiki: filter state murni di client + `window.history.replaceState` yang di-debounce 350ms.
 2. **`FilterChips.tsx` / `RegisterView.tsx`** — re-render seluruh 24 chip filter tiap 1 klik karena handler & array opsi dibuat baru tiap render. Diperbaiki: `memo()` + opsi di-`useMemo`, handler di-`useCallback`.
@@ -194,20 +251,41 @@ Dicatat supaya tidak terulang kalau menyentuh file yang sama:
 4. **ESLint `react-hooks/set-state-in-effect`** akan error pada hidrasi dari `localStorage` — beri `eslint-disable-next-line` dengan alasan (pola sudah ada di `data-context.tsx`, `auth-context.tsx`, `RegisterView.tsx`, `DashboardView.tsx`; jangan dihapus).
 5. **`tsconfig.json` & `eslint.config.mjs` mengecualikan `apps/**`** — itu backend NestJS terpisah, bukan bagian dari proyek Next.js ini. Jangan hapus exclude ini kecuali memang berniat menyatukan monorepo.
 6. **Warning lint yang aman & sudah diketahui:** `react-hooks/incompatible-library` pada `useReactTable` di `RegisterView.tsx` — TanStack Table memang stack wajib PRD.
-7. **Next 16 hanya izinkan satu instance `next dev`** per proyek (lockfile). Jangan jalankan dua dev server.
+7. **Next 16 hanya izinkan satu instance `next dev`** per proyek (lockfile). Jangan jalankan dua dev server. Hal serupa berlaku untuk backend: proses `nest start --watch` yang menumpuk akan **mengunci `node_modules/.prisma/client/query_engine-windows.dll.node`** sehingga `npx prisma generate` gagal dengan `EPERM`. Kalau kena itu, matikan dulu semua proses node yang menunjuk ke `D:\WebApp`.
 8. **Warna chart divalidasi, bukan dikira-kira.** Kalau mengubah hex di `viz-tokens.ts`, jalankan ulang skill `dataviz` → `scripts/validate_palette.js`. Kategori nominal (disiplin, zona) pakai satu warna datar; hanya prioritas (tingkatan berurutan) yang boleh pakai ramp — dan array prioritas HARUS di-sort by `bobot` dulu sebelum dipetakan ke ramp (lihat §8.5).
 9. **Testing browser di lingkungan ini kadang menembak race condition palsu.** Firing beberapa `.click()` sinkron dalam satu loop tanpa `await`/delay antar klik bisa membuat elemen DOM lama (sebelum re-render React) jadi stale reference — hasilnya klik kelihatan "gagal" padahal app-nya benar. Selalu beri jeda kecil (~50ms) antar interaksi saat menguji lewat `javascript_tool`.
-10. **`localStorage` key naik dari `clashhub-data-v1` ke `clashhub-data-v2`** karena skema state berubah total (master data jadi mutable). Kalau menambah field baru ke `StoredState` lagi di masa depan, pertimbangkan menaikkan versi key lagi atau menulis migrasi eksplisit — saat ini tidak ada migrasi, data lama hilang begitu saja (`JSON.parse` gagal → fallback ke `loadInitial()`).
+10. **`localStorage` key sekarang `clashhub-data-v3`** (v1 → v2 saat master data jadi mutable, v2 → v3 saat master data pindah ke API). Tidak ada migrasi: kalau `JSON.parse` gagal, data lama hilang dan di-seed ulang. Kalau mengubah bentuk `LocalState` lagi, naikkan versinya.
+11. **Access token TIDAK boleh dipindah ke `localStorage`.** Sekarang disimpan di variabel modul `src/lib/api/client.ts` supaya tidak terbaca XSS; ketahanan sesi datang dari cookie refresh `httpOnly`, bukan dari menyimpan token di disk.
+12. **Jangan tambahkan CORS di backend.** `next.config.ts` mem-proxy `/api/*` ke `localhost:3001` lewat `rewrites`, jadi dari sisi browser semuanya same-origin dan cookie tetap first-party. Menambah CORS + `credentials: "include"` hanya akan menambah permukaan masalah tanpa manfaat.
 
 ---
 
 ## 10. Menjalankan & verifikasi
 
+Butuh **dua** server. Keduanya terdaftar di `.claude/launch.json`.
+
 ```bash
-npm install
-npm run dev      # http://localhost:3000
-npm run build    # cek tipe + build production
-npm run lint
+# sekali saja
+docker compose -f apps/api/docker-compose.yml up -d
+npm install && npm --prefix apps/api install
+npm --prefix apps/api exec prisma migrate deploy
+npm --prefix apps/api exec prisma db seed
+```
+
+```bash
+npm --prefix apps/api run start:dev   # API  → http://localhost:3001/api
+```
+
+```bash
+npm run dev                            # Web → http://localhost:3000
+```
+
+Pemeriksaan:
+
+```bash
+npm run build && npm run lint          # frontend
+npm --prefix apps/api run build        # backend
+npm --prefix apps/api test             # 12 unit test (RolesGuard + AuthService)
 ```
 
 Performa: mode dev ~5x lebih lambat dari production. Untuk menilai kelancaran UI sesungguhnya, ukur di `npm run build && npm start`.
@@ -226,9 +304,10 @@ Drill-down dashboard → register memakai parameter yang sama (termasuk `overdue
 
 ## 12. Rekomendasi langkah berikutnya
 
-Frontend sudah lengkap secara fungsional. Pilihan realistis:
-
-- **Mulai backend sungguhan** — monorepo pnpm, Prisma schema dari `ClashHub_ERD.md`, Docker Compose, auth JWT + argon2, lalu ganti isi `src/lib/data-context.tsx` dengan pemanggilan API (komponen halaman tidak perlu berubah, karena semuanya sudah lewat `useData()`/`useMasterDataLookups()`). **Ini juga saat yang tepat memutuskan nasib `apps/api/`** yang sudah ada — apakah dilanjutkan sebagai backend resmi atau dibuang.
-- **Polish UX** — skeleton loading, empty state yang lebih kaya, animasi transisi (kalau mau, dengan `isAnimationActive` yang dikontrol hati-hati mengingat gotcha #3).
-- **Tes otomatis** — belum ada unit/integration test sama sekali; kandidat kuat adalah `dashboard-metrics.ts` (fungsi murni, gampang di-test) dan `use-master-data.ts` (`allowedStatusTransitions`).
+- **`ClashesModule` (paling utama)** — clash, komentar, audit log, lampiran. Pola integrasinya sudah terbukti di Sprint 1: tambah modul NestJS → tambah tipe di `src/lib/api/types.ts` → tambah mapper → ganti bagian `localStorage` di `data-context.tsx`. Komponen halaman tidak perlu disentuh. Setelah ini selesai, `localStorage` dan `mock-data.ts` bisa dibuang sepenuhnya.
+- **Object storage untuk lampiran** — prasyarat agar lampiran bertahan setelah reload (lihat §5 "Lampiran"). Sekarang `Attachment.fileUrl` sudah ada di skema tapi belum ada yang mengisinya.
+- **Sprint 5 (notifikasi email async)** — jalankan Redis dari `docker-compose.yml`, tambah BullMQ. Skema `Notification` & `NotificationPreference` sudah siap, termasuk `whatsappNumber`.
+- **Refresh token rotation & blacklist** — saat ini refresh token hanya diverifikasi tanda tangannya; logout menghapus cookie tapi token yang sudah dicuri masih valid sampai kedaluwarsa. Belum kritis untuk demo, wajib sebelum produksi (Sprint 11).
+- **Tes otomatis frontend** — masih nol. Kandidat kuat: `dashboard-metrics.ts` (fungsi murni) dan `allowedStatusTransitions` di `use-master-data.ts`. Backend sudah punya 12 test.
+- **Verifikasi target performa PRD** (register ≤1s, dashboard ≤3s untuk 10.000 clash) — data seed baru ~87 record; `generateSeedData(count)` menerima parameter count untuk stress-test.
 - **Verifikasi target performa PRD** (register ≤1s, dashboard ≤3s untuk 10.000 clash) — data mock baru ~89 record; `generateSeedData(count)` di `mock-data.ts` menerima parameter count kalau mau stress-test dengan data lebih besar.

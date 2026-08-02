@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { z } from "zod";
 import { useAuth } from "@/lib/auth-context";
-import { useData } from "@/lib/data-context";
 
 const loginSchema = z.object({
   email: z.string().min(1, "Email wajib diisi").email("Format email tidak valid"),
@@ -13,16 +12,26 @@ const loginSchema = z.object({
 
 type FieldErrors = Partial<Record<"email" | "password", string>>;
 
-const DEMO_ROLE_ORDER = ["Engineer", "Coordinator", "Management", "Admin"] as const;
+/** Password shared by every seeded account (see apps/api/prisma/seed.ts). */
+const DEMO_PASSWORD = "demo1234";
+
+// Listed statically: the user list now comes from the API, which needs a
+// session — so there is nothing to read from before signing in.
+const DEMO_ACCOUNTS = [
+  { peran: "Engineer", email: "engineer@clashhub.dev" },
+  { peran: "Coordinator", email: "coordinator@clashhub.dev" },
+  { peran: "Management", email: "management@clashhub.dev" },
+  { peran: "Admin", email: "admin@clashhub.dev" },
+] as const;
 
 export default function LoginPage() {
   const { login, user, isLoading } = useAuth();
-  const { users } = useData();
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [errors, setErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!isLoading && user) {
@@ -30,7 +39,7 @@ export default function LoginPage() {
     }
   }, [isLoading, user, router]);
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setFormError(null);
     const result = loginSchema.safeParse({ email, password });
@@ -44,7 +53,9 @@ export default function LoginPage() {
       return;
     }
     setErrors({});
-    const res = login(result.data.email, result.data.password);
+    setSubmitting(true);
+    const res = await login(result.data.email, result.data.password);
+    setSubmitting(false);
     if (!res.ok) {
       setFormError(res.message);
       return;
@@ -112,29 +123,30 @@ export default function LoginPage() {
           </div>
           <button
             type="submit"
-            className="w-full rounded-lg bg-zinc-900 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-zinc-800"
+            disabled={submitting}
+            className="w-full rounded-lg bg-zinc-900 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
           >
-            Masuk
+            {submitting ? "Memproses…" : "Masuk"}
           </button>
         </form>
 
         <div className="mt-6 rounded-2xl border border-zinc-200 bg-white p-4 text-xs text-zinc-500">
-          <p className="mb-2 font-medium text-zinc-700">Akun demo (password bebas, min. 4 karakter):</p>
+          <p className="mb-2 font-medium text-zinc-700">
+            Akun demo (password <span className="font-mono">{DEMO_PASSWORD}</span>):
+          </p>
           <ul className="space-y-1">
-            {DEMO_ROLE_ORDER.map((role) => users.find((u) => u.peran === role && u.isActive))
-              .filter((u): u is NonNullable<typeof u> => Boolean(u))
-              .map((u) => (
-              <li key={u.id} className="flex items-center justify-between">
-                <span>{u.peran}</span>
+            {DEMO_ACCOUNTS.map((account) => (
+              <li key={account.email} className="flex items-center justify-between">
+                <span>{account.peran}</span>
                 <button
                   type="button"
                   className="rounded bg-zinc-100 px-2 py-0.5 font-mono text-zinc-700 hover:bg-zinc-200"
                   onClick={() => {
-                    setEmail(u.email);
-                    setPassword("demo1234");
+                    setEmail(account.email);
+                    setPassword(DEMO_PASSWORD);
                   }}
                 >
-                  {u.email}
+                  {account.email}
                 </button>
               </li>
             ))}

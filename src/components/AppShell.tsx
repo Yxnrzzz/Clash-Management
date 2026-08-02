@@ -14,7 +14,7 @@ const ROLE_LABEL: Record<string, string> = {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
-  const { project } = useData();
+  const { project, syncError } = useData();
   const pathname = usePathname();
   const router = useRouter();
 
@@ -110,8 +110,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
           <button
             onClick={() => {
-              logout();
-              router.push("/login");
+              void logout().finally(() => router.push("/login"));
             }}
             className="mt-2 w-full rounded-lg px-3 py-2 text-left text-sm text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900"
           >
@@ -119,7 +118,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </button>
         </div>
       </aside>
-      <main className="flex-1 overflow-x-hidden">{children}</main>
+      <main className="flex-1 overflow-x-hidden">
+        {syncError && (
+          <div
+            role="alert"
+            className="border-b border-red-200 bg-red-50 px-6 py-2.5 text-sm text-red-700"
+          >
+            Gagal menyimpan ke server: {syncError}
+          </div>
+        )}
+        {children}
+      </main>
     </div>
   );
 }
