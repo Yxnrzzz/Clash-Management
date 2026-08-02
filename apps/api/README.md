@@ -1,4 +1,4 @@
-# ClashHub API — Sprint 1 (Auth, RBAC & Administrasi) + ClashesModule
+# ClashHub API — Sprint 1 (Auth, RBAC & Administrasi) + ClashesModule (+ server-side list/metrics)
 
 Backend NestJS untuk ClashHub. PostgreSQL & Redis dijalankan via Docker Compose, skema dikelola oleh Prisma ORM.
 
@@ -51,7 +51,7 @@ Server berjalan di `http://localhost:3001` dengan prefix `/api` (port dikonfigur
 npm test
 ```
 
-Mencakup `RolesGuard` (izin/tolak per peran), `AuthService` (login benar/salah/akun nonaktif, isi payload token), dan `ClashesService` (RBAC per-field, transisi status, `closedAt`, audit log, format `uniqueCode`) — 26 test total.
+Mencakup `RolesGuard` (izin/tolak per peran), `AuthService` (login benar/salah/akun nonaktif, isi payload token), dan `ClashesService` (RBAC per-field, transisi status, `closedAt`, audit log, format `uniqueCode`, filter/sort/pagination di `list()`, agregasi di `metrics()`) — 29 test total.
 
 ## Environment
 
@@ -94,7 +94,8 @@ JWT_REFRESH_TTL="7d"
 | POST | `/api/master-data/disciplines` \| `zones` \| `priorities` | Admin |
 | PATCH | `/api/master-data/disciplines/:id` \| `zones/:id` \| `priorities/:id` \| `statuses/:id` | Admin |
 | PATCH | `/api/master-data/{disciplines,zones,priorities}/:id/active` | Admin |
-| GET | `/api/clashes` | semua yang login (seluruh clash proyek aktif, tanpa pagination server-side) |
+| GET | `/api/clashes` | semua yang login (filter/sort/pagination server-side — lihat di bawah) |
+| GET | `/api/clashes/metrics` | semua yang login (agregasi dashboard — KPI, tren mingguan, sebaran) |
 | GET | `/api/clashes/:id` | semua yang login (clash + komentar + audit log) |
 | POST | `/api/clashes` | Engineer, Coordinator, Admin |
 | PATCH | `/api/clashes/:id` | Engineer (item sendiri, status maju 1 langkah saja, tidak boleh menutup), Coordinator/Admin (penuh) |
@@ -102,6 +103,14 @@ JWT_REFRESH_TTL="7d"
 | POST | `/api/clashes/:id/comments` | Engineer, Coordinator, Admin |
 
 `PATCH /api/clashes/:id` menerima subset `{ statusId, priorityId, assigneeId, dueDate }`. Aturan siapa boleh mengubah field mana ditegakkan di `ClashesService` (`assertCanEdit`, `buildAllowedPatch`), bukan cuma `@Roles()` — lihat `src/clashes/clashes.service.ts`. Setiap field yang benar-benar berubah menulis satu baris `AuditLog`, dengan `oldValue`/`newValue` sudah diterjemahkan ke nama (bukan id mentah). `uniqueCode` pada `POST /api/clashes` dibuat server-side dalam transaksi, format `{kode-proyek}-{kode-disiplin}-{urutan 4 digit}`.
+
+### `GET /api/clashes` — query params
+
+Semua opsional: `q` (cari di kode/judul/deskripsi), `disc`/`stat`/`prio`/`zone`/`assignee` (csv id), `reporterId`, `cf`/`ct` (tanggal dibuat dari/sampai, `YYYY-MM-DD`), `overdue` (`1`), `sort` (`kodeUnik`\|`judul`\|`status`\|`priority`\|`dueDate`\|`createdAt`, default `createdAt`), `dir` (`asc`\|`desc`, default `desc`), `page` (default `1`), `pageSize` (default `10`, maksimum `10000`). Respons: `{ data: Clash[], total: number }`. `pageSize=10000` dipakai oleh tombol export Register untuk mengambil seluruh hasil filter tanpa endpoint terpisah.
+
+### `GET /api/clashes/metrics` — query params
+
+`from`/`to` opsional (ISO 8601 instant lengkap, bukan tanggal saja — beda dari `cf`/`ct` di atas). Mengembalikan `{ totalClash, openCount, closedCount, overdueCount, mttrDays, trend, byDiscipline, byPriority, byZone }`, port dari `computeMetrics()` di frontend (`src/lib/dashboard-metrics.ts`) — lihat komentar di `ClashesService.metrics()` kalau formulanya perlu diubah, karena keduanya harus tetap sinkron.
 
 Status **tidak** bisa ditambah atau dihapus — hanya label dan `isClosedState` yang bisa diubah. Alasannya `allowedStatusTransitions()` di frontend bergantung pada rantai empat tahap yang tetap (`sequence`). Server juga menolak permintaan yang membuat tidak ada satu pun status penutup tersisa.
 

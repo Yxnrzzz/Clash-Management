@@ -13,12 +13,18 @@ import { useData } from "@/lib/data-context";
 import { useMasterDataLookups } from "@/lib/use-master-data";
 import { formatDate } from "@/lib/lookup";
 import { exportClashesToExcel, exportClashesToPdf } from "@/lib/export";
+import { apiGet, ApiError } from "@/lib/api/client";
+import { toClash } from "@/lib/api/mappers";
+import type { ApiClashListResponse } from "@/lib/api/types";
 import type { Clash } from "@/lib/types";
 import { PriorityBadge, StatusBadge, OverdueBadge } from "@/components/Badge";
 import { FilterChipGroup } from "./FilterChips";
 import { BulkToolbar } from "./BulkToolbar";
 
 const PAGE_SIZE = 10;
+/** Cap matches the backend DTO's pageSize max — lets export reuse GET /clashes
+ * unpaginated instead of needing a second endpoint. */
+const EXPORT_PAGE_SIZE = 10000;
 
 const SORTABLE_FIELDS = new Set([
   "kodeUnik",
@@ -103,11 +109,31 @@ function serializeFilters(filters: FiltersState) {
   return qs ? `?${qs}` : "";
 }
 
+/** Same param names as serializeFilters(), but always explicit (no "only if
+ * non-default" omission) since this is what the server actually reads. */
+function buildQueryParams(filters: FiltersState, pageSize: number): URLSearchParams {
+  const params = new URLSearchParams();
+  if (filters.q) params.set("q", filters.q);
+  if (filters.disc.length) params.set("disc", filters.disc.join(","));
+  if (filters.stat.length) params.set("stat", filters.stat.join(","));
+  if (filters.prio.length) params.set("prio", filters.prio.join(","));
+  if (filters.zone.length) params.set("zone", filters.zone.join(","));
+  if (filters.assignee.length) params.set("assignee", filters.assignee.join(","));
+  if (filters.cf) params.set("cf", filters.cf);
+  if (filters.ct) params.set("ct", filters.ct);
+  if (filters.overdue) params.set("overdue", "1");
+  params.set("sort", filters.sort);
+  params.set("dir", filters.dir);
+  params.set("page", String(filters.page));
+  params.set("pageSize", String(pageSize));
+  return params;
+}
+
 const columnHelper = createColumnHelper<Clash>();
 
 export function RegisterView() {
   const { user, isLoading } = useRequireAuth();
-  const { clashes, project, bulkUpdateClashes } = useData();
+  const { project, bulkUpdateClashes } = useData();
   const {
     disciplines,
     zones,
@@ -188,7 +214,7 @@ export function RegisterView() {
     setFilters((prev) => ({ ...prev, overdue: !prev.overdue, page: 1 }));
   }, []);
 
-  const { q, disc: disciplineIds, stat: statusIds, prio: priorityIds, zone: zoneIds, assignee: assigneeIds, cf: createdFrom, ct: createdTo, overdue: overdueOnly, sort: sortBy, dir: sortDir, page } = filters;
+  const { disc: disciplineIds, stat: statusIds, prio: priorityIds, zone: zoneIds, assignee: assigneeIds, cf: createdFrom, ct: createdTo, overdue: overdueOnly, sort: sortBy, dir: sortDir, page } = filters;
 
   // Filter chips show every discipline/zone/priority ever used — including
   // deactivated ones — so a coordinator can still find historical clashes
@@ -219,82 +245,58 @@ export function RegisterView() {
     [users]
   );
 
-  const filtered = useMemo(() => {
-    let result = clashes.filter((c) => {
-      if (disciplineIds.length && !disciplineIds.includes(c.disciplineId)) return false;
-      if (statusIds.length && !statusIds.includes(c.statusId)) return false;
-      if (priorityIds.length && !priorityIds.includes(c.priorityId)) return false;
-      if (zoneIds.length && !zoneIds.includes(c.zoneId)) return false;
-      if (assigneeIds.length && !(c.assigneeId && assigneeIds.includes(c.assigneeId))) return false;
-      if (createdFrom && new Date(c.createdAt) < new Date(createdFrom)) return false;
-      if (createdTo && new Date(c.createdAt) > new Date(createdTo + "T23:59:59")) return false;
-      if (overdueOnly && !isOverdue(c)) return false;
-      if (q) {
-        const needle = q.toLowerCase();
-        const haystack = `${c.kodeUnik} ${c.judul} ${c.deskripsi}`.toLowerCase();
-        if (!haystack.includes(needle)) return false;
-      }
-      return true;
-    });
+  // Filtering, sorting, and pagination all happen server-side now (see
+  // HANDOFF.md §12) — this effect is the Register's only data fetch. It's
+  // debounced the same way the URL sync above is, so a burst of chip clicks
+  // coalesces into one request instead of one per click.
+  const [rows, setRows] = useState<Clash[]>([]);
+  const [total, setTotal] = useState(0);
+  const [isFetching, setIsFetching] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
 
-    result = [...result].sort((a, b) => {
-      let av: string | number = "";
-      let bv: string | number = "";
-      switch (sortBy) {
-        case "kodeUnik":
-          av = a.kodeUnik;
-          bv = b.kodeUnik;
-          break;
-        case "judul":
-          av = a.judul;
-          bv = b.judul;
-          break;
-        case "status":
-          av = statusById(a.statusId)?.urutan ?? 0;
-          bv = statusById(b.statusId)?.urutan ?? 0;
-          break;
-        case "priority":
-          av = priorityById(a.priorityId)?.bobot ?? 0;
-          bv = priorityById(b.priorityId)?.bobot ?? 0;
-          break;
-        case "dueDate":
-          av = a.dueDate ?? "";
-          bv = b.dueDate ?? "";
-          break;
-        case "createdAt":
-        default:
-          av = a.createdAt;
-          bv = b.createdAt;
-      }
-      if (av < bv) return sortDir === "asc" ? -1 : 1;
-      if (av > bv) return sortDir === "asc" ? 1 : -1;
-      return 0;
-    });
+  useEffect(() => {
+    if (!hydrated.current) return;
+    let cancelled = false;
+    const timeout = setTimeout(() => {
+      setIsFetching(true);
+      const params = buildQueryParams(filters, PAGE_SIZE);
+      apiGet<ApiClashListResponse>(`/clashes?${params.toString()}`)
+        .then((res) => {
+          if (cancelled) return;
+          setRows(res.data.map(toClash));
+          setTotal(res.total);
+          setFetchError(null);
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          setFetchError(error instanceof ApiError ? error.message : "Gagal memuat data clash.");
+        })
+        .finally(() => {
+          if (!cancelled) setIsFetching(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [filters, reloadTick]);
 
-    return result;
-  }, [
-    clashes,
-    disciplineIds,
-    statusIds,
-    priorityIds,
-    zoneIds,
-    assigneeIds,
-    createdFrom,
-    createdTo,
-    overdueOnly,
-    q,
-    sortBy,
-    sortDir,
-    statusById,
-    priorityById,
-    isOverdue,
-  ]);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const currentPage = Math.min(page, totalPages);
-  const paged = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
-  const pagedIds = useMemo(() => paged.map((c) => c.id), [paged]);
+  const currentPage = page;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const pagedIds = useMemo(() => rows.map((c) => c.id), [rows]);
   const allOnPageSelected = pagedIds.length > 0 && pagedIds.every((id) => selectedIds.has(id));
+
+  /** Same filters, unpaginated — used only when the user clicks Export. */
+  const fetchAllMatching = useCallback(async (): Promise<Clash[]> => {
+    const params = buildQueryParams(filters, EXPORT_PAGE_SIZE);
+    params.set("page", "1");
+    const res = await apiGet<ApiClashListResponse>(`/clashes?${params.toString()}`);
+    return res.data.map(toClash);
+  }, [filters]);
+
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const toggleRowSelected = useCallback((id: string) => {
     setSelectedIds((prev) => {
@@ -427,7 +429,7 @@ export function RegisterView() {
   );
 
   const table = useReactTable({
-    data: paged,
+    data: rows,
     columns,
     getCoreRowModel: getCoreRowModel(),
   });
@@ -443,33 +445,51 @@ export function RegisterView() {
   const exportLookups = { disciplineById, zoneById, statusById, priorityById, userById };
   const dateStamp = new Date().toISOString().slice(0, 10);
 
-  function handleExportExcel() {
-    exportClashesToExcel(filtered, exportLookups, `clashhub-register-${dateStamp}.xlsx`);
+  async function handleExportExcel() {
+    setIsExporting(true);
+    setExportError(null);
+    try {
+      const all = await fetchAllMatching();
+      exportClashesToExcel(all, exportLookups, `clashhub-register-${dateStamp}.xlsx`);
+    } catch {
+      setExportError("Gagal mengambil data untuk export. Periksa koneksi dan coba lagi.");
+    } finally {
+      setIsExporting(false);
+    }
   }
 
-  function handleExportPdf() {
-    const closedCount = filtered.filter((c) => statusById(c.statusId)?.isClosedState).length;
-    const overdueCount = filtered.filter((c) => isOverdue(c)).length;
-    const resolved = filtered.filter((c) => c.closedAt);
-    const mttrDays =
-      resolved.length > 0
-        ? Math.round(
-            (resolved.reduce(
-              (sum, c) => sum + (new Date(c.closedAt!).getTime() - new Date(c.createdAt).getTime()),
-              0
-            ) /
-              resolved.length /
-              86_400_000) *
-              10
-          ) / 10
-        : null;
-    exportClashesToPdf(
-      filtered,
-      exportLookups,
-      { total: filtered.length, open: filtered.length - closedCount, closed: closedCount, overdue: overdueCount, mttrDays },
-      project.nama,
-      `clashhub-register-${dateStamp}.pdf`
-    );
+  async function handleExportPdf() {
+    setIsExporting(true);
+    setExportError(null);
+    try {
+      const all = await fetchAllMatching();
+      const closedCount = all.filter((c) => statusById(c.statusId)?.isClosedState).length;
+      const overdueCount = all.filter((c) => isOverdue(c)).length;
+      const resolved = all.filter((c) => c.closedAt);
+      const mttrDays =
+        resolved.length > 0
+          ? Math.round(
+              (resolved.reduce(
+                (sum, c) => sum + (new Date(c.closedAt!).getTime() - new Date(c.createdAt).getTime()),
+                0
+              ) /
+                resolved.length /
+                86_400_000) *
+                10
+            ) / 10
+          : null;
+      exportClashesToPdf(
+        all,
+        exportLookups,
+        { total: all.length, open: all.length - closedCount, closed: closedCount, overdue: overdueCount, mttrDays },
+        project.nama,
+        `clashhub-register-${dateStamp}.pdf`
+      );
+    } catch {
+      setExportError("Gagal mengambil data untuk export. Periksa koneksi dan coba lagi.");
+    } finally {
+      setIsExporting(false);
+    }
   }
 
   return (
@@ -478,7 +498,7 @@ export function RegisterView() {
         <div>
           <h1 className="text-xl font-semibold text-zinc-900">Clash Register</h1>
           <p className="text-sm text-zinc-500">
-            {filtered.length} item ditemukan
+            {total} item ditemukan
             {user.peran === "Management" && " · Mode baca-saja"}
           </p>
         </div>
@@ -486,16 +506,18 @@ export function RegisterView() {
           <button
             type="button"
             onClick={handleExportExcel}
-            className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-50"
+            disabled={isExporting}
+            className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-40"
           >
-            Export Excel
+            {isExporting ? "Mengekspor…" : "Export Excel"}
           </button>
           <button
             type="button"
             onClick={handleExportPdf}
-            className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-50"
+            disabled={isExporting}
+            className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-40"
           >
-            Export PDF
+            {isExporting ? "Mengekspor…" : "Export PDF"}
           </button>
           {user.peran !== "Management" && (
             <Link
@@ -608,6 +630,14 @@ export function RegisterView() {
         </div>
       </div>
 
+      {exportError && (
+        <p className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{exportError}</p>
+      )}
+
+      {fetchError && (
+        <p className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{fetchError}</p>
+      )}
+
       {canBulkEdit && selectedIds.size > 0 && (
         <BulkToolbar
           selectedCount={selectedIds.size}
@@ -619,6 +649,9 @@ export function RegisterView() {
             try {
               await bulkUpdateClashes(Array.from(selectedIds), patch, user.id);
               setSelectedIds(new Set());
+              // bulkUpdateClashes doesn't touch any shared state (see
+              // data-context.tsx) — this page owns refreshing its own page.
+              setReloadTick((t) => t + 1);
             } catch {
               // Failure is already surfaced via the syncError banner
               // (AppShell); keep the selection so the user can retry.
@@ -656,7 +689,14 @@ export function RegisterView() {
             ))}
           </thead>
           <tbody>
-            {paged.length === 0 && (
+            {isFetching && rows.length === 0 && (
+              <tr>
+                <td colSpan={columns.length} className="px-4 py-12 text-center text-sm text-zinc-400">
+                  Memuat…
+                </td>
+              </tr>
+            )}
+            {!isFetching && rows.length === 0 && (
               <tr>
                 <td colSpan={columns.length} className="px-4 py-12 text-center text-sm text-zinc-400">
                   Tidak ada clash yang cocok dengan filter saat ini.

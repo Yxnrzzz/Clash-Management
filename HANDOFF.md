@@ -1,7 +1,7 @@
 # ClashHub — Handoff Progress
 
-**Tanggal:** 2 Agustus 2026 (update ke-4)
-**Status:** Frontend selesai. **Sprint 1 + `ClashesModule` (Sprint 2/3/4) backend selesai dan tersambung**: auth JWT + argon2, RBAC, CRUD user/proyek/master-data, dan clash/komentar/audit log semuanya berjalan di NestJS + PostgreSQL dengan RBAC ditegakkan server-side. Fase hybrid **berakhir** untuk domain inti — hanya lampiran dan preferensi notifikasi yang masih di `localStorage` (menunggu object storage & modul notifikasi).
+**Tanggal:** 2 Agustus 2026 (update ke-5)
+**Status:** Frontend selesai. **Sprint 1 + `ClashesModule` (Sprint 2/3/4) backend selesai dan tersambung**: auth JWT + argon2, RBAC, CRUD user/proyek/master-data, dan clash/komentar/audit log semuanya berjalan di NestJS + PostgreSQL dengan RBAC ditegakkan server-side. Fase hybrid **berakhir** untuk domain inti — hanya lampiran dan preferensi notifikasi yang masih di `localStorage` (menunggu object storage & modul notifikasi). **Update ke-5:** `GET /clashes` sekarang filter/sort/pagination server-side, dan `GET /clashes/metrics` (baru) menghitung KPI/tren/sebaran dashboard di server — lihat §12 lama, sekarang selesai. Konsekuensinya, `DataContext` tidak lagi memuat semua clash di bootstrap (lihat §5 "Clashes tidak lagi di-bulk-load").
 **Lokasi proyek:** `D:\WebApp`
 
 Dokumen ini untuk melanjutkan pengerjaan di sesi/chat baru. Baca ini dulu sebelum menulis kode.
@@ -19,6 +19,8 @@ ClashHub adalah web platform manajemen clash & issue koordinasi BIM. Dokumen sum
 | `ClashHub_PRD.md` | Product Requirements — persona, user story, acceptance criteria, NFR |
 | `ClashHub_ERD.md` | Entity Relationship Diagram (PostgreSQL) |
 | `ClashHub_Sprint_Plan.md` | 12 sprint (0–11) + prompt siap-pakai per sprint |
+
+**Update ke-5 (server-side pagination + agregasi dashboard):** `GET /clashes` menerima query params (`q`, `disc`/`stat`/`prio`/`zone`/`assignee`, `reporterId`, `cf`/`ct`, `overdue`, `sort`, `dir`, `page`, `pageSize`) dan mengembalikan `{ data, total }` — filter/sort/pagination Register sekarang dihitung Prisma, bukan array JS di browser. Endpoint baru `GET /clashes/metrics` menghitung KPI/tren mingguan/sebaran dashboard di server (port dari `computeMetrics()` di `dashboard-metrics.ts`), jadi `DashboardView` tidak lagi butuh seluruh array clash. Konsekuensi arsitektur: `DataContext` **berhenti memuat semua clash di bootstrap** — `master.clashes` (array) diganti `master.clashesById` (cache kecil, terisi on-demand oleh `loadClashDetail`/`createClash`/`updateClashField`). Register, Dashboard, dan "Clash Saya" masing-masing fetch sendiri dari `/clashes`; hanya halaman detail clash yang masih memakai `clashesById`. Lihat §5 "Clashes tidak lagi di-bulk-load" untuk detail lengkap.
 
 **Update sejak handoff ke-3 (`ClashesModule`):** clash, komentar, dan audit log pindah dari `localStorage` ke NestJS + PostgreSQL. Backend baru: `apps/api/src/clashes/` (`ClashesController`/`ClashesService`/DTO) dengan 6 endpoint (list, detail, create, update, bulk update, comment) dan RBAC penuh di service layer — bukan cuma `@Roles()` — termasuk aturan "Engineer hanya boleh edit item sendiri" dan "Engineer hanya boleh maju status 1 langkah, tidak boleh menutup". Audit log dan `uniqueCode` sekarang dibuat server-side (tidak bisa dipalsukan client). Index `Clash` yang tadinya satu composite 8-kolom diganti 4 index yang benar-benar dipakai. Frontend: `data-context.tsx` tidak lagi menyimpan clash/komentar/audit di localStorage; `mock-data.ts` **dihapus total**; `localStorage` sekarang hanya berisi lampiran (sesi-only) dan preferensi notifikasi.
 
@@ -73,11 +75,12 @@ src/
 │   ├── AppShell.tsx             sidebar + nav (nav & menu Admin difilter per peran)
 │   ├── Badge.tsx
 │   ├── register/
-│   │   ├── RegisterView.tsx     tabel + filter + sort + pagination + bulk + export
+│   │   ├── RegisterView.tsx     filter/sort/pagination server-side (fetch /clashes per
+│   │   │                        perubahan filter, debounced); export fetch semua-cocok on-demand
 │   │   ├── FilterChips.tsx      chip group (memoized)
 │   │   └── BulkToolbar.tsx      toolbar bulk update + modal konfirmasi
 │   └── dashboard/
-│       ├── DashboardView.tsx
+│       ├── DashboardView.tsx    fetch /clashes/metrics (server hitung KPI/tren/sebaran)
 │       ├── ChartPieces.tsx
 │       └── viz-tokens.ts
 └── lib/
@@ -88,8 +91,13 @@ src/
     │   ├── mappers.ts            SATU-SATUNYA tempat terjemahan Inggris ↔ Indonesia
     │   └── types.ts              bentuk respons API mentah (name/role/weight/sequence)
     ├── types.ts                 tipe domain — TIDAK BERUBAH sejak Sprint 1
-    ├── data-context.tsx          master data + clash/komentar/audit dari API; hanya lampiran
-    │                             & preferensi notifikasi yang masih localStorage (lihat §5)
+    ├── dashboard-metrics.ts      computeMetrics() TIDAK DIPAKAI DashboardView lagi (server yang
+    │                             hitung sejak update ke-5) — sengaja dipertahankan sbg fungsi
+    │                             murni untuk unit test (lihat §12); resolveRange/RANGE_PRESETS
+    │                             masih dipakai untuk UI range picker & WEEK_LABEL diekspor utk mappers.ts
+    ├── data-context.tsx          master data dari API; clashesById (BUKAN array, lihat §5) sbg
+    │                             cache kecil on-demand utk clash; hanya lampiran & preferensi
+    │                             notifikasi yang masih localStorage (lihat §5)
     ├── auth-context.tsx          auth ASLI — login/refresh/logout ke API
     ├── use-master-data.ts        hook lookup (disciplineById dst.) terikat ke array live
     ├── use-require-auth.ts       guard route (login wajib)
@@ -108,10 +116,15 @@ apps/api/src/
 │   ├── guards/                   JwtAuthGuard, RolesGuard, ProjectMemberGuard (dipakai di clashes)
 │   └── user.view.ts              serializer user (passwordHash tidak pernah ikut)
 ├── users/  ·  projects/  ·  master-data/     controller + service + dto
-├── clashes/                      BARU — clash + komentar + audit log
-│   ├── clashes.controller.ts     GET /clashes, GET /:id, POST, PATCH /:id, POST /bulk, POST /:id/comments
-│   ├── clashes.service.ts        RBAC per-field, generator uniqueCode, audit log server-side
-│   └── clashes.service.spec.ts   14 test: RBAC, transisi status, closedAt, audit, uniqueCode
+├── clashes/                      clash + komentar + audit log
+│   ├── clashes.controller.ts     GET /clashes (filter/sort/pagination), GET /clashes/metrics
+│   │                             (HARUS didaftarkan sebelum GET /:id — lihat komentar di file),
+│   │                             GET /:id, POST, PATCH /:id, POST /bulk, POST /:id/comments
+│   ├── clashes.service.ts        RBAC per-field, generator uniqueCode, audit log server-side,
+│   │                             list() (where/orderBy/skip/take Prisma), metrics() (port dari
+│   │                             computeMetrics() frontend — keduanya harus tetap sinkron)
+│   └── clashes.service.spec.ts   17 test: RBAC, transisi status, closedAt, audit, uniqueCode,
+│                                  list() filter/sort/pagination, metrics() agregasi
 └── prisma/                       PrismaService
 ```
 
@@ -191,7 +204,18 @@ Kalau PATCH gagal, `data-context` menaruh pesannya di `syncError` dan menarik ul
 
 Clash, komentar, dan audit log mengikuti pola yang sama persis dengan Sprint 1 (tipe di `api/types.ts` → mapper di `api/mappers.ts` → context) tapi dengan satu perbedaan penting: **`createClash`, `updateClashField`, `bulkUpdateClashes`, dan `addComment` sekarang mengembalikan `Promise`**, bukan langsung memberi hasil sinkron. Semua call site sudah di-`await` (lihat `clashes/new/page.tsx`, `clashes/[id]/page.tsx`, `RegisterView.tsx`, `import/page.tsx`) — kalau menambah call site baru, jangan lupa `await`/`.catch()`, atau state UI (mis. tombol "Menerapkan…") tidak akan pernah sempat tampil.
 
-**Daftar clash (`GET /clashes`) memuat semua sekaligus, tanpa pagination server-side.** Ini pola "muat semua" yang sama dengan master data — cukup untuk ratusan/ribuan clash, tapi belum untuk target PRD 10.000 clash. Kalau performa Register mulai terasa lambat di data besar, ini titik yang perlu diubah jadi filter/sort/pagination server-side (lihat §12).
+**`GET /clashes` sekarang filter/sort/pagination server-side (update ke-5).** Query params: `q`, `disc`/`stat`/`prio`/`zone`/`assignee` (csv id), `reporterId`, `cf`/`ct` (tanggal, `YYYY-MM-DD`), `overdue` (`1`), `sort`, `dir`, `page`, `pageSize` (default 10, maks 10000). Respons `{ data, total }`. `RegisterView.tsx` mem-fetch endpoint ini langsung (debounced ~250ms per perubahan filter) alih-alih memfilter array lokal. Export (Excel/PDF) memanggil endpoint yang sama dengan `pageSize=10000` untuk mendapat seluruh hasil filter tanpa paginasi — makanya tombol export sekarang **async** dan bisa gagal (lihat `fetchAllMatching()` di `RegisterView.tsx`).
+
+### Clashes tidak lagi di-bulk-load (update ke-5)
+
+Sebelum update ke-5, `DataContext` memuat **seluruh** clash sekali di bootstrap (`master.clashes: Clash[]`) dan membaginya ke semua konsumen. Ini pola yang sama persis dengan masalah "muat semua" di atas, hanya dari sisi frontend: bahkan kalau `/clashes` sudah dipaginasi server-side, memuat semuanya ke context di awal sesi tetap mengirim seluruh tabel clash ke browser setiap login.
+
+Sekarang `master.clashesById: Record<string, Clash>` — **cache kecil, bukan daftar lengkap**, terisi on-demand oleh `loadClashDetail()`, `createClash()`, dan `updateClashField()`. Konsekuensinya:
+
+- **Register** (`RegisterView.tsx`), **Dashboard** (`DashboardView.tsx`), dan **Clash Saya** (`my-clashes/page.tsx`) masing-masing fetch sendiri dari `/clashes` (atau `/clashes/metrics` untuk Dashboard) — tidak ada satu pun yang membaca `clashesById`.
+- **Halaman detail** (`clashes/[id]/page.tsx`) membaca `clashesById[id]`, diisi oleh `loadClashDetail(id)` yang sudah dipanggil di `useEffect` saat mount (tidak berubah dari sebelumnya).
+- **`bulkUpdateClashes`** tidak lagi refetch & menyimpan ulang seluruh daftar clash ke context (dulu satu-satunya alasan fungsi ini melakukan refetch adalah supaya array global tetap segar). Sekarang ia hanya `POST /clashes/bulk` dan mengembalikan `{ updated }` — pemanggilnya (Register) yang bertanggung jawab refresh halamannya sendiri (lihat `reloadTick` di `RegisterView.tsx`).
+- Kalau menambah halaman baru yang perlu menampilkan clash, **jangan** tergoda menambahkannya kembali ke `MasterState` sebagai array — fetch langsung dari `/clashes` dengan query params yang sesuai, seperti tiga contoh di atas.
 
 **Komentar & audit log dimuat lazy per clash**, bukan ikut batch fetch awal. Halaman detail (`clashes/[id]/page.tsx`) memanggil `loadClashDetail(id)` di `useEffect` saat mount; hasilnya di-*merge* ke array `comments`/`auditLogs` di context (dedupe by id via `mergeById`). Kalau butuh komentar/audit di halaman lain, panggil `loadClashDetail` dulu — jangan asumsikan array itu sudah terisi.
 
@@ -227,10 +251,10 @@ Aturan terpusat di frontend: `src/lib/lookup.ts` (`canEditClash`, `canComment`) 
 | 0 | Fondasi backend | ✅ Selesai | NestJS + Prisma + PostgreSQL, 2 migrasi ter-apply, seed idempoten, `/api/health` |
 | 1 | Auth, RBAC, Administrasi | ✅ Selesai | JWT + argon2id, RolesGuard/ProjectMemberGuard, CRUD user/proyek/master-data, **frontend tersambung**, 12 unit test lulus |
 | 2 | Input clash + lampiran | 🟢 Clash selesai, lampiran belum | Clash dari DB via `ClashesModule`; lampiran masih localStorage (belum ada object storage) |
-| 3 | Clash Register | ✅ Selesai | Data clash dari DB (`GET /clashes`, muat-semua, belum server-side filter/sort) |
-| 4 | Detail, komentar, audit, triase | ✅ Selesai | Komentar & audit dari DB (lazy-load per clash), RBAC field-level di server, audit trail server-generated |
+| 3 | Clash Register | ✅ Selesai | Data clash dari DB, filter/sort/pagination server-side (`GET /clashes`, update ke-5) |
+| 4 | Detail, komentar, audit, triase | 🟢 Selesai (1 gap kecil) | Komentar & audit dari DB (lazy-load per clash), RBAC field-level di server, audit trail server-generated — tapi tab Riwayat tidak refresh otomatis setelah edit di sesi yang sama, butuh reload (lihat task terpisah yang di-spawn saat verifikasi update ke-5, belum dikerjakan) |
 | 5 | Notifikasi email async | ❌ Belum | Butuh Redis + BullMQ (Redis ada di compose, belum dijalankan) |
-| 6 | Dashboard Manajemen | 🟢 Frontend selesai | Agregasi masih di client, sekarang dari clash DB (bukan localStorage) — belum endpoint agregasi server |
+| 6 | Dashboard Manajemen | ✅ Selesai | Agregasi (KPI/tren/sebaran) dihitung server-side (`GET /clashes/metrics`, update ke-5) |
 | 7 | Export Excel/PDF + Bulk update | ✅ Selesai | Export client-side (SheetJS + jsPDF); bulk update sekarang lewat `POST /clashes/bulk` |
 | 8 | WhatsApp + preferensi kanal | 🟢 Frontend selesai | Kolom `whatsappNumber` sudah ada di skema; preferensi masih di localStorage |
 | 9 | Bulk import CSV/XML | 🟢 Frontend selesai (CSV saja) | Commit sekarang lewat `POST /clashes` async per baris (bukan localStorage); XML di-scope-cut |
@@ -285,6 +309,8 @@ c. **Prisma `ClashUpdateInput` (checked) tidak mengekspos field FK skalar** keti
 13. **Id master data (disiplin/zona/prioritas/status/user) BUKAN uuid untuk baris hasil seed** — jangan pakai `@IsUUID()` di DTO backend untuk field yang mereferensikannya. Lihat §5 dan §8a.
 14. **Mutator clash (`createClash`, `updateClashField`, `bulkUpdateClashes`, `addComment`) sekarang mengembalikan `Promise`.** Call site baru wajib `await` atau `.catch()` — kalau tidak, state loading/error di UI tidak akan pernah muncul (lihat §8b) dan galat jaringan jadi unhandled rejection yang senyap.
 15. **Testing browser via `javascript_tool` di lingkungan ini: `await` top-level sering gagal dengan `SyntaxError`.** Pola yang jalan: bungkus dalam `(function() { ... })()` (IIFE, bukan arrow function kalau butuh `return`), atau untuk `fetch` async simpan hasilnya ke `window.__namaVariabel` di satu panggilan lalu baca di panggilan berikutnya. Redeclare `const`/`let` dengan nama sama di beberapa panggilan juga akan error ("Identifier ... has already been declared") karena scope tampaknya persisten antar panggilan — pakai IIFE atau nama variabel unik.
+16. **`ClashesController.metrics()` (`GET /clashes/metrics`) HARUS didaftarkan sebelum `findOne()` (`GET /:id`).** NestJS/Express mencocokkan route sesuai urutan deklarasi di kelas — kalau `:id` dideklarasikan lebih dulu, request ke `/clashes/metrics` akan ketangkap sebagai `id="metrics"` alih-alih handler metrics. Kalau menambah route statis baru di bawah `/clashes`, taruh sebelum `:id`.
+17. **`GET /clashes/metrics`'s `from`/`to` beda kontrak dari `GET /clashes`'s `cf`/`ct`.** `cf`/`ct` (dipakai Register) adalah tanggal saja (`YYYY-MM-DD`, dari `<input type="date">`) — backend yang menambahkan waktu akhir hari. `from`/`to` (dipakai Dashboard) adalah ISO instant lengkap (`Date#toISOString()`, sudah termasuk waktu & `Z`) — backend memakainya langsung tanpa modifikasi. Jangan disamakan formatnya kalau menyalin pola salah satu ke yang lain.
 
 ---
 
@@ -313,7 +339,7 @@ Pemeriksaan:
 ```bash
 npm run build && npm run lint          # frontend
 npm --prefix apps/api run build        # backend
-npm --prefix apps/api test             # 26 unit test (RolesGuard, AuthService, ClashesService)
+npm --prefix apps/api test             # 29 unit test (RolesGuard, AuthService, ClashesService)
 ```
 
 Performa: mode dev ~5x lebih lambat dari production. Untuk menilai kelancaran UI sesungguhnya, ukur di `npm run build && npm start`.
@@ -333,11 +359,12 @@ Drill-down dashboard → register memakai parameter yang sama (termasuk `overdue
 ## 12. Rekomendasi langkah berikutnya
 
 - **Object storage untuk lampiran (disk lokal dulu)** — prasyarat agar lampiran bertahan setelah reload (lihat §5 "Lampiran"). `Attachment.fileUrl` sudah ada di skema tapi belum ada yang mengisinya. Rencana: `apps/api/uploads/` + endpoint upload multipart + endpoint download terproteksi, di balik abstraksi storage supaya gampang pindah ke S3/R2 nanti.
-- **Filter/sort/pagination server-side untuk `GET /clashes`** — prasyarat target PRD register ≤1s @ 10.000 clash. Sekarang endpoint ini muat-semua (lihat §5 "ClashesModule").
-- **Endpoint agregasi dashboard** — `dashboard-metrics.ts` masih menghitung KPI/tren/sebaran di client dari seluruh array clash. Prasyarat target PRD dashboard ≤3s @ 10.000 clash.
+- ~~Filter/sort/pagination server-side untuk `GET /clashes`~~ — **selesai (update ke-5)**, lihat §5 "Clashes tidak lagi di-bulk-load".
+- ~~Endpoint agregasi dashboard~~ — **selesai (update ke-5)**, `GET /clashes/metrics`.
+- **Riwayat (audit trail) tidak refresh otomatis setelah edit** — ditemukan saat verifikasi browser update ke-5: `updateClashField()` di `data-context.tsx` menulis clash yang diperbarui ke `clashesById`, tapi tidak memuat ulang audit log clash itu, jadi tab "Riwayat" di halaman detail baru menunjukkan baris baru setelah reload manual. Server-nya sudah benar (baris `AuditLog` tertulis saat itu juga). Bug pre-existing, bukan regresi dari update ke-5 (dikonfirmasi lewat `git diff` — `updateClashField` memang belum pernah menyentuh `auditLogs`). Task terpisah sudah di-spawn untuk ini, belum dikerjakan.
+- **Verifikasi target performa PRD di data besar (masih relevan meski pagination sudah server-side)** — seed sekarang 87-90 clash; setelah update ke-5, `GET /clashes` dan `/clashes/metrics` sudah query Prisma langsung (bukan muat-semua-lalu-filter-di-JS), tapi belum ada index/query tuning khusus atau load test terhadap target 10.000 clash. Itu tetap pekerjaan Sprint 11.
 - **Sprint 5/8 (notifikasi email + WhatsApp async)** — jalankan Redis dari `docker-compose.yml`, tambah BullMQ. Skema `Notification` & `NotificationPreference` sudah siap, termasuk `whatsappNumber`. `notificationPreferences` juga perlu dipindah dari localStorage ke API (pola sama seperti `ClashesModule`).
 - **Refresh token rotation & blacklist** — saat ini refresh token hanya diverifikasi tanda tangannya; logout menghapus cookie tapi token yang sudah dicuri masih valid sampai kedaluwarsa. Belum kritis untuk demo, wajib sebelum produksi (Sprint 11).
 - **Hardening (Sprint 11)** — belum ada global exception filter (error Prisma mentah seperti `P2002`/`P2003` di luar jalur yang sudah ditangani bisa bocor jadi 500), belum ada logging, belum ada rate limit di `/auth/login`, belum ada `helmet`, belum ada validasi skema env (`DATABASE_URL` hilang baru ketahuan saat query pertama, bukan saat boot). Kredensial demo di-hardcode di `login/page.tsx` — wajib dihapus sebelum deploy sungguhan.
-- **Tes otomatis frontend** — masih nol. Kandidat kuat: `dashboard-metrics.ts` (fungsi murni) dan `allowedStatusTransitions` di `use-master-data.ts`. Backend sudah punya 26 test (12 lama + 14 `ClashesService`).
+- **Tes otomatis frontend** — masih nol. Kandidat kuat: `dashboard-metrics.ts` (fungsi murni, sekarang tidak dipanggil `DashboardView` tapi masih dijaga sebagai referensi formula untuk `ClashesService.metrics()`) dan `allowedStatusTransitions` di `use-master-data.ts`. Backend sudah punya 29 test (12 lama + 14 `ClashesService` RBAC/create + 3 `list()`/`metrics()`).
 - **Dockerfile + CI** — belum ada sama sekali. Deliverable CI Sprint 0 sebenarnya belum terpenuhi.
-- **Verifikasi target performa PRD di data besar** — seed sekarang 87 clash (lihat `seedClashes()` di `apps/api/prisma/seed.ts`, konstanta `count`). Naikkan angka itu untuk stress-test setelah filter/sort/pagination server-side ada.

@@ -12,12 +12,53 @@ import {
   BulkUpdatePatchDto,
   CreateClashDto,
   CreateCommentDto,
+  DashboardMetricsQueryDto,
+  ListClashesQueryDto,
   UpdateClashDto,
 } from './dto/clash.dto';
 
 type PatchableField = 'statusId' | 'priorityId' | 'assigneeId' | 'dueDate';
 type PatchValue = string | null | undefined;
 type Patch = Partial<Record<PatchableField, PatchValue>>;
+
+interface Slice {
+  id: string;
+  label: string;
+  value: number;
+}
+
+interface TrendPoint {
+  weekStart: string;
+  createdCount: number;
+  closedCount: number;
+}
+
+export interface DashboardMetrics {
+  totalClash: number;
+  openCount: number;
+  closedCount: number;
+  overdueCount: number;
+  mttrDays: number | null;
+  trend: TrendPoint[];
+  byDiscipline: Slice[];
+  byPriority: Slice[];
+  byZone: Slice[];
+}
+
+/** Monday 00:00 of the week containing `date` — mirrors src/lib/dashboard-metrics.ts's startOfWeek(). */
+function startOfWeek(date: Date): Date {
+  const d = new Date(date);
+  const dayFromMonday = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - dayFromMonday);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function addDays(date: Date, days: number): Date {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
 
 /**
  * Mirrors the RBAC rules the frontend already enforces for UX
@@ -36,12 +77,209 @@ export class ClashesService {
 
   // --- Reads -----------------------------------------------------------------
 
-  async list() {
+  /**
+   * Filters/sorts/paginates server-side — see RegisterView.tsx's FiltersState
+   * for the param shape this mirrors. pageSize can go up to 10000 (see the
+   * DTO), which is what lets the Register's export buttons reuse this same
+   * method (page=1&pageSize=10000) instead of a separate unpaginated route.
+   */
+  async list(query: ListClashesQueryDto) {
     const project = await this.currentProject();
-    return this.prisma.clash.findMany({
-      where: { projectId: project.id },
-      orderBy: { createdAt: 'desc' },
+    const where = this.buildListWhere(project.id, query);
+    const orderBy = this.buildListOrderBy(query.sort, query.dir);
+
+    const [data, total] = await Promise.all([
+      this.prisma.clash.findMany({
+        where,
+        orderBy,
+        skip: (query.page - 1) * query.pageSize,
+        take: query.pageSize,
+      }),
+      this.prisma.clash.count({ where }),
+    ]);
+
+    return { data, total };
+  }
+
+  private buildListWhere(projectId: string, query: ListClashesQueryDto): Prisma.ClashWhereInput {
+    const where: Prisma.ClashWhereInput = { projectId };
+
+    if (query.disc?.length) where.disciplineId = { in: query.disc };
+    if (query.stat?.length) where.statusId = { in: query.stat };
+    if (query.prio?.length) where.priorityId = { in: query.prio };
+    if (query.zone?.length) where.zoneId = { in: query.zone };
+    if (query.assignee?.length) where.assigneeId = { in: query.assignee };
+    if (query.reporterId) where.reporterId = query.reporterId;
+
+    if (query.cf || query.ct) {
+      where.createdAt = {
+        ...(query.cf ? { gte: new Date(query.cf) } : {}),
+        ...(query.ct ? { lte: new Date(`${query.ct}T23:59:59.999Z`) } : {}),
+      };
+    }
+
+    // Independent predicate from the status-chip filter above — a request
+    // can combine "status = Open" with "overdue = true" just like the
+    // Register's client-side filter used to.
+    if (query.overdue) {
+      where.status = { isClosedState: false };
+      where.dueDate = { lt: new Date() };
+    }
+
+    if (query.q) {
+      where.OR = [
+        { uniqueCode: { contains: query.q, mode: 'insensitive' } },
+        { title: { contains: query.q, mode: 'insensitive' } },
+        { description: { contains: query.q, mode: 'insensitive' } },
+      ];
+    }
+
+    return where;
+  }
+
+  private buildListOrderBy(
+    sort: ListClashesQueryDto['sort'],
+    dir: 'asc' | 'desc',
+  ): Prisma.ClashOrderByWithRelationInput {
+    switch (sort) {
+      case 'kodeUnik':
+        return { uniqueCode: dir };
+      case 'judul':
+        return { title: dir };
+      case 'status':
+        return { status: { sequence: dir } };
+      case 'priority':
+        return { priority: { weight: dir } };
+      case 'dueDate':
+        return { dueDate: dir };
+      case 'createdAt':
+      default:
+        return { createdAt: dir };
+    }
+  }
+
+  /**
+   * Server-side port of computeMetrics() in src/lib/dashboard-metrics.ts —
+   * same math (weekly trend buckets, MTTR, overdue count, zero-filled
+   * slices), so the two must be kept in sync if the formula ever changes.
+   * Trend points carry only `weekStart` (no formatted `label`); the frontend
+   * mapper formats it with the existing Indonesian-locale formatter so
+   * locale-specific presentation stays out of the API contract.
+   */
+  async metrics(query: DashboardMetricsQueryDto): Promise<DashboardMetrics> {
+    const project = await this.currentProject();
+
+    const [disciplines, zones, priorities, statuses] = await Promise.all([
+      this.prisma.discipline.findMany({ where: { projectId: project.id } }),
+      this.prisma.zone.findMany({ where: { projectId: project.id } }),
+      this.prisma.priority.findMany(),
+      this.prisma.status.findMany(),
+    ]);
+
+    // from/to are full ISO instants (Date#toISOString() on the frontend's
+    // already-resolved range), not date-only strings — unlike list()'s
+    // cf/ct, which come from plain <input type="date"> fields.
+    const end = query.to ? new Date(query.to) : new Date();
+    const start = query.from ? new Date(query.from) : null;
+
+    const clashes = await this.prisma.clash.findMany({
+      where: {
+        projectId: project.id,
+        createdAt: { ...(start ? { gte: start } : {}), lte: end },
+      },
+      select: {
+        disciplineId: true,
+        zoneId: true,
+        priorityId: true,
+        statusId: true,
+        dueDate: true,
+        createdAt: true,
+        closedAt: true,
+      },
     });
+
+    const statusMap = new Map(statuses.map((s) => [s.id, s]));
+    const now = Date.now();
+
+    let closedCount = 0;
+    let overdueCount = 0;
+    let resolutionMsTotal = 0;
+    let resolvedForMttr = 0;
+
+    for (const c of clashes) {
+      const closed = statusMap.get(c.statusId)?.isClosedState ?? false;
+      if (closed) closedCount++;
+      const overdue = !closed && Boolean(c.dueDate) && c.dueDate!.getTime() < now;
+      if (overdue) overdueCount++;
+      if (closed && c.closedAt) {
+        resolutionMsTotal += c.closedAt.getTime() - c.createdAt.getTime();
+        resolvedForMttr++;
+      }
+    }
+
+    const trend: TrendPoint[] = [];
+    if (clashes.length > 0) {
+      const timestamps = clashes.map((c) => c.createdAt.getTime());
+      const firstWeek = startOfWeek(new Date(Math.min(...timestamps)));
+      const lastWeek = startOfWeek(end);
+      const buckets = new Map<string, TrendPoint>();
+
+      for (let w = new Date(firstWeek); w <= lastWeek; w = addDays(w, 7)) {
+        const key = w.toISOString().slice(0, 10);
+        buckets.set(key, { weekStart: key, createdCount: 0, closedCount: 0 });
+      }
+
+      for (const c of clashes) {
+        const createdBucket = buckets.get(startOfWeek(c.createdAt).toISOString().slice(0, 10));
+        if (createdBucket) createdBucket.createdCount++;
+
+        if (c.closedAt) {
+          const closedBucket = buckets.get(startOfWeek(c.closedAt).toISOString().slice(0, 10));
+          if (closedBucket) closedBucket.closedCount++;
+        }
+      }
+      trend.push(...buckets.values());
+    }
+
+    return {
+      totalClash: clashes.length,
+      openCount: clashes.length - closedCount,
+      closedCount,
+      overdueCount,
+      mttrDays:
+        resolvedForMttr > 0
+          ? Math.round((resolutionMsTotal / resolvedForMttr / 86_400_000) * 10) / 10
+          : null,
+      trend,
+      byDiscipline: this.countBy(
+        clashes,
+        'disciplineId',
+        disciplines.map((d) => ({ id: d.id, label: d.code })),
+      ),
+      byPriority: this.countBy(
+        clashes,
+        'priorityId',
+        [...priorities].sort((a, b) => a.weight - b.weight).map((p) => ({ id: p.id, label: p.name })),
+      ),
+      byZone: this.countBy(
+        clashes,
+        'zoneId',
+        zones.map((z) => ({ id: z.id, label: `${z.level} · ${z.name}` })),
+      ),
+    };
+  }
+
+  private countBy<T extends Record<string, unknown>>(
+    clashes: T[],
+    key: keyof T,
+    source: { id: string; label: string }[],
+  ): Slice[] {
+    const counts = new Map<string, number>();
+    for (const c of clashes) {
+      const id = c[key] as string;
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    return source.map((s) => ({ id: s.id, label: s.label, value: counts.get(s.id) ?? 0 }));
   }
 
   async findDetail(id: string) {

@@ -3,6 +3,7 @@ import { Role } from '@prisma/client';
 import { ClashesService } from './clashes.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthUser } from '../auth/auth.types';
+import { DashboardMetricsQueryDto, ListClashesQueryDto } from './dto/clash.dto';
 
 const PROJECT = { id: 'proj-1', code: 'MCA', createdAt: new Date('2026-01-01') };
 
@@ -305,5 +306,119 @@ describe('ClashesService.create', () => {
         data: expect.objectContaining({ clashId: 'clash-new', action: 'created', actorId: 'u-eng' }),
       }),
     );
+  });
+});
+
+describe('ClashesService.list', () => {
+  it('translates filter/sort/pagination query params into Prisma where/orderBy/skip/take', async () => {
+    const rows = [baseClash({ id: 'c1' })];
+    const findMany = jest.fn(() => Promise.resolve(rows));
+    const count = jest.fn(() => Promise.resolve(1));
+    const prisma = {
+      project: { findFirst: jest.fn(() => Promise.resolve(PROJECT)) },
+      clash: { findMany, count },
+    } as unknown as PrismaService;
+    const service = new ClashesService(prisma);
+
+    const result = await service.list({
+      disc: ['disc-ars'],
+      stat: ['st-open'],
+      prio: [],
+      zone: [],
+      assignee: [],
+      overdue: true,
+      q: 'pipa',
+      sort: 'status',
+      dir: 'asc',
+      page: 2,
+      pageSize: 20,
+    } as ListClashesQueryDto);
+
+    expect(result).toEqual({ data: rows, total: 1 });
+    expect(findMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        projectId: PROJECT.id,
+        disciplineId: { in: ['disc-ars'] },
+        statusId: { in: ['st-open'] },
+        status: { isClosedState: false },
+        dueDate: { lt: expect.any(Date) },
+        OR: expect.any(Array),
+      }),
+      orderBy: { status: { sequence: 'asc' } },
+      skip: 20,
+      take: 20,
+    });
+    expect(count).toHaveBeenCalledWith({ where: expect.objectContaining({ projectId: PROJECT.id }) });
+  });
+
+  it('defaults to createdAt desc, page 1, with no filters applied', async () => {
+    const findMany = jest.fn(() => Promise.resolve([]));
+    const count = jest.fn(() => Promise.resolve(0));
+    const prisma = {
+      project: { findFirst: jest.fn(() => Promise.resolve(PROJECT)) },
+      clash: { findMany, count },
+    } as unknown as PrismaService;
+    const service = new ClashesService(prisma);
+
+    await service.list({ sort: 'createdAt', dir: 'desc', page: 1, pageSize: 10 } as ListClashesQueryDto);
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: { projectId: PROJECT.id },
+      orderBy: { createdAt: 'desc' },
+      skip: 0,
+      take: 10,
+    });
+  });
+});
+
+describe('ClashesService.metrics', () => {
+  it('aggregates totals, MTTR, overdue count, weekly trend, and zero-filled slices', async () => {
+    const clashes = [
+      {
+        disciplineId: 'disc-ars',
+        zoneId: 'zone-1',
+        priorityId: 'pr-low',
+        statusId: 'st-open',
+        dueDate: new Date('2026-06-01'),
+        createdAt: new Date('2026-06-29'),
+        closedAt: null,
+      },
+      {
+        disciplineId: 'disc-ars',
+        zoneId: 'zone-1',
+        priorityId: 'pr-high',
+        statusId: 'st-closed',
+        dueDate: null,
+        createdAt: new Date('2026-06-30'),
+        closedAt: new Date('2026-07-02'),
+      },
+    ];
+    const prisma = {
+      project: { findFirst: jest.fn(() => Promise.resolve(PROJECT)) },
+      discipline: { findMany: jest.fn(() => Promise.resolve([{ id: 'disc-ars', code: 'ARS' }])) },
+      zone: {
+        findMany: jest.fn(() => Promise.resolve([{ id: 'zone-1', name: 'Zona A', level: 'Lantai 1' }])),
+      },
+      priority: { findMany: jest.fn(() => Promise.resolve(PRIORITIES)) },
+      status: { findMany: jest.fn(() => Promise.resolve(STATUSES)) },
+      clash: { findMany: jest.fn(() => Promise.resolve(clashes)) },
+    } as unknown as PrismaService;
+    const service = new ClashesService(prisma);
+
+    const result = await service.metrics({ to: '2026-07-05' } as DashboardMetricsQueryDto);
+
+    expect(result.totalClash).toBe(2);
+    expect(result.closedCount).toBe(1);
+    expect(result.openCount).toBe(1);
+    expect(result.overdueCount).toBe(1);
+    expect(result.mttrDays).toBe(2);
+    expect(result.byDiscipline).toEqual([{ id: 'disc-ars', label: 'ARS', value: 2 }]);
+    expect(result.byPriority).toEqual([
+      { id: 'pr-low', label: 'Low', value: 1 },
+      { id: 'pr-high', label: 'High', value: 1 },
+    ]);
+    expect(result.byZone).toEqual([{ id: 'zone-1', label: 'Lantai 1 · Zona A', value: 2 }]);
+    expect(result.trend.reduce((sum, t) => sum + t.createdCount, 0)).toBe(2);
+    expect(result.trend.reduce((sum, t) => sum + t.closedCount, 0)).toBe(1);
   });
 });

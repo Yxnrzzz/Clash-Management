@@ -11,10 +11,12 @@ import type {
   User,
   Zone,
 } from "../types";
+import { WEEK_LABEL, type DashboardMetrics } from "../dashboard-metrics";
 import type {
   ApiAuditLog,
   ApiClash,
   ApiComment,
+  ApiDashboardMetrics,
   ApiDiscipline,
   ApiPriority,
   ApiProject,
@@ -175,3 +177,22 @@ export type ClashFieldPatch = Partial<{
   assigneeId: string | null;
   dueDate: string | null;
 }>;
+
+// --- Dashboard metrics ---------------------------------------------------
+
+export const toDashboardMetrics = (m: ApiDashboardMetrics): DashboardMetrics => ({
+  totalClash: m.totalClash,
+  openCount: m.openCount,
+  closedCount: m.closedCount,
+  overdueCount: m.overdueCount,
+  mttrDays: m.mttrDays,
+  trend: m.trend.map((t) => ({
+    weekStart: t.weekStart,
+    label: WEEK_LABEL.format(new Date(t.weekStart)),
+    dibuat: t.createdCount,
+    ditutup: t.closedCount,
+  })),
+  byDiscipline: m.byDiscipline,
+  byPriority: m.byPriority,
+  byZone: m.byZone,
+});

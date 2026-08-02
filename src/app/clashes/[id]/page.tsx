@@ -14,7 +14,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
   const { id } = use(params);
   const { user, isLoading } = useRequireAuth();
   const {
-    clashes,
+    clashesById,
     comments,
     auditLogs,
     attachments,
@@ -45,7 +45,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     return <div className="p-8 text-sm text-zinc-500">Memuat…</div>;
   }
 
-  const clash = clashes.find((c) => c.id === id);
+  const clash = clashesById[id];
   if (!clash) {
     return (
       <div className="mx-auto max-w-xl px-6 py-16 text-center">

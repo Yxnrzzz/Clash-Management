@@ -48,7 +48,10 @@ function addDays(date: Date, days: number) {
   return d;
 }
 
-const WEEK_LABEL = new Intl.DateTimeFormat("id-ID", { day: "2-digit", month: "short" });
+// Exported so api/mappers.ts can format the weekStart the backend's
+// /clashes/metrics endpoint returns without duplicating the Intl formatter —
+// locale-specific presentation stays out of the API contract.
+export const WEEK_LABEL = new Intl.DateTimeFormat("id-ID", { day: "2-digit", month: "short" });
 
 /**
  * Resolves the active window. An explicit from/to always wins over the preset,

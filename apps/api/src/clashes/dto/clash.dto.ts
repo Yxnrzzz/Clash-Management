@@ -1,16 +1,29 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMinSize,
   ArrayNotEmpty,
   IsArray,
+  IsIn,
   IsISO8601,
+  IsInt,
   IsOptional,
   IsString,
   IsUUID,
+  Max,
+  Min,
   MinLength,
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
+
+/** Splits a comma-separated query param into a trimmed, non-empty string[]. */
+function splitCsv(value: unknown): string[] {
+  if (typeof value !== 'string' || value.length === 0) return [];
+  return value
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
 
 /**
  * Master-data ids (discipline/zone/priority/status) are NOT guaranteed to be
@@ -116,4 +129,99 @@ export class CreateCommentDto {
   @IsString()
   @MinLength(1, { message: 'Komentar tidak boleh kosong' })
   content!: string;
+}
+
+const SORTABLE_FIELDS = ['kodeUnik', 'judul', 'status', 'priority', 'dueDate', 'createdAt'] as const;
+
+/**
+ * Query params for GET /clashes. Mirrors the shape RegisterView.tsx already
+ * builds for its URL (see FiltersState in RegisterView.tsx) so the frontend
+ * can forward its filter state to the server almost verbatim.
+ *
+ * pageSize's cap (10000, not the register's page size of 10) is what lets
+ * export reuse this same endpoint instead of needing a second one: export
+ * asks for page=1&pageSize=10000 to get every matching row unpaginated.
+ */
+export class ListClashesQueryDto {
+  @IsOptional()
+  @IsString()
+  q?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => splitCsv(value))
+  @IsArray()
+  @IsString({ each: true })
+  disc?: string[];
+
+  @IsOptional()
+  @Transform(({ value }) => splitCsv(value))
+  @IsArray()
+  @IsString({ each: true })
+  stat?: string[];
+
+  @IsOptional()
+  @Transform(({ value }) => splitCsv(value))
+  @IsArray()
+  @IsString({ each: true })
+  prio?: string[];
+
+  @IsOptional()
+  @Transform(({ value }) => splitCsv(value))
+  @IsArray()
+  @IsString({ each: true })
+  zone?: string[];
+
+  @IsOptional()
+  @Transform(({ value }) => splitCsv(value))
+  @IsArray()
+  @IsString({ each: true })
+  assignee?: string[];
+
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  reporterId?: string;
+
+  @IsOptional()
+  @IsISO8601(undefined, { message: 'Format tanggal "dibuat dari" tidak valid' })
+  cf?: string;
+
+  @IsOptional()
+  @IsISO8601(undefined, { message: 'Format tanggal "dibuat sampai" tidak valid' })
+  ct?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => value === '1' || value === 'true')
+  overdue?: boolean;
+
+  @IsOptional()
+  @IsIn(SORTABLE_FIELDS, { message: 'Field sort tidak valid' })
+  sort: (typeof SORTABLE_FIELDS)[number] = 'createdAt';
+
+  @IsOptional()
+  @IsIn(['asc', 'desc'])
+  dir: 'asc' | 'desc' = 'desc';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page = 1;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  pageSize = 10;
+}
+
+export class DashboardMetricsQueryDto {
+  @IsOptional()
+  @IsISO8601(undefined, { message: 'Format tanggal "dari" tidak valid' })
+  from?: string;
+
+  @IsOptional()
+  @IsISO8601(undefined, { message: 'Format tanggal "sampai" tidak valid' })
+  to?: string;
 }

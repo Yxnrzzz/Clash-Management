@@ -66,6 +66,12 @@ import type {
  * Comments and audit logs are loaded lazily per clash via loadClashDetail()
  * rather than in the initial batch fetch — the list view never needs them,
  * only the detail page does.
+ *
+ * Clashes are NOT bulk-loaded here (see clashesById below) — Register,
+ * Dashboard, "Clash Saya", and the detail page each fetch exactly what they
+ * need directly from /clashes, since the whole point of server-side
+ * filter/sort/pagination is to stop shipping every clash to the browser on
+ * every login (see HANDOFF.md §12).
  */
 
 const STORAGE_KEY = "clashhub-data-v4";
@@ -89,7 +95,13 @@ interface MasterState {
   zones: Zone[];
   statuses: Status[];
   priorities: Priority[];
-  clashes: Clash[];
+  /**
+   * A small on-demand cache, NOT the full clash list — populated by
+   * loadClashDetail(), createClash(), and updateClashField() as pages touch
+   * individual clashes. Register/Dashboard/"Clash Saya" fetch their own data
+   * straight from /clashes and don't read this.
+   */
+  clashesById: Record<string, Clash>;
   /** Populated lazily, clash by clash, via loadClashDetail(). */
   comments: Comment[];
   auditLogs: AuditLogEntry[];
@@ -209,16 +221,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const reloadMasterData = useCallback(async () => {
     try {
-      const [project, users, disciplines, zones, statuses, priorities, clashes] =
-        await Promise.all([
-          apiGet<ApiProject>("/projects/current"),
-          apiGet<ApiUser[]>("/users"),
-          apiGet<ApiDiscipline[]>("/master-data/disciplines"),
-          apiGet<ApiZone[]>("/master-data/zones"),
-          apiGet<ApiStatus[]>("/master-data/statuses"),
-          apiGet<ApiPriority[]>("/master-data/priorities"),
-          apiGet<ApiClash[]>("/clashes"),
-        ]);
+      const [project, users, disciplines, zones, statuses, priorities] = await Promise.all([
+        apiGet<ApiProject>("/projects/current"),
+        apiGet<ApiUser[]>("/users"),
+        apiGet<ApiDiscipline[]>("/master-data/disciplines"),
+        apiGet<ApiZone[]>("/master-data/zones"),
+        apiGet<ApiStatus[]>("/master-data/statuses"),
+        apiGet<ApiPriority[]>("/master-data/priorities"),
+      ]);
 
       setMaster({
         project: toProject(project),
@@ -227,7 +237,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         zones: zones.map(toZone),
         statuses: statuses.map(toStatus),
         priorities: priorities.map(toPriority),
-        clashes: clashes.map(toClash),
+        clashesById: {},
         comments: [],
         auditLogs: [],
       });
@@ -316,7 +326,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       const createdApi = await runWrite(
         () => apiPost<ApiClash>("/clashes", newClashPayload(input)),
         (result) =>
-          patchMaster((prev) => ({ ...prev, clashes: [toClash(result), ...prev.clashes] }))
+          patchMaster((prev) => ({
+            ...prev,
+            clashesById: { ...prev.clashesById, [result.id]: toClash(result) },
+          }))
       );
       const created = toClash(createdApi);
 
@@ -351,6 +364,27 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     [patchMaster, runWrite]
   );
 
+  /** Fetches one clash's comments + audit log and merges them into context. */
+  const loadClashDetail = useCallback(
+    async (clashId: string): Promise<void> => {
+      try {
+        const detail = await apiGet<ApiClashDetail>(`/clashes/${clashId}`);
+        const comments = detail.comments.map(toComment);
+        const auditLogs = detail.auditLogs.map(toAuditLog);
+        patchMaster((prev) => ({
+          ...prev,
+          clashesById: { ...prev.clashesById, [clashId]: toClash(detail) },
+          comments: mergeById(prev.comments, comments),
+          auditLogs: mergeById(prev.auditLogs, auditLogs),
+        }));
+        setSyncError(null);
+      } catch (error) {
+        setSyncError(messageOf(error));
+      }
+    },
+    [patchMaster]
+  );
+
   const updateClashField = useCallback(
     async (
       clashId: string,
@@ -367,13 +401,23 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         (updated) =>
           patchMaster((prev) => ({
             ...prev,
-            clashes: prev.clashes.map((c) => (c.id === clashId ? toClash(updated) : c)),
+            clashesById: { ...prev.clashesById, [clashId]: toClash(updated) },
           }))
       );
+      // The PATCH response is just the updated clash row — the server-side
+      // AuditLog row it wrote isn't in it, so the Riwayat tab needs a
+      // follow-up fetch to see the new entry without a manual reload.
+      await loadClashDetail(clashId);
     },
-    [patchMaster, runWrite]
+    [patchMaster, runWrite, loadClashDetail]
   );
 
+  /**
+   * Bulk can touch many rows at once, and none of them are necessarily in
+   * clashesById's small on-demand cache — so unlike the single-clash mutators
+   * above, this doesn't try to patch local state. RegisterView owns the page
+   * these ids came from and re-fetches it after this resolves.
+   */
   const bulkUpdateClashes = useCallback(
     async (
       ids: string[],
@@ -381,26 +425,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       _actorId: string
     ): Promise<{ updated: number }> => {
       void _actorId;
-      const result = await runWrite(
+      return runWrite(
         () => apiPost<{ updated: number }>("/clashes/bulk", { ids, patch }),
         () => {}
       );
-
-      // Bulk can touch many rows at once — refetch the list rather than
-      // reconstructing every changed field (and its audit label) locally.
-      // Best-effort: the mutation above already succeeded, so a refetch
-      // failure only means the UI is stale until the next reload, not that
-      // the bulk update itself failed.
-      try {
-        const clashes = await apiGet<ApiClash[]>("/clashes");
-        patchMaster((prev) => ({ ...prev, clashes: clashes.map(toClash) }));
-      } catch (error) {
-        setSyncError(messageOf(error));
-      }
-
-      return result;
     },
-    [patchMaster, runWrite]
+    [runWrite]
   );
 
   const addComment = useCallback(
@@ -413,26 +443,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       );
     },
     [patchMaster, runWrite]
-  );
-
-  const loadClashDetail = useCallback(
-    async (clashId: string): Promise<void> => {
-      try {
-        const detail = await apiGet<ApiClashDetail>(`/clashes/${clashId}`);
-        const comments = detail.comments.map(toComment);
-        const auditLogs = detail.auditLogs.map(toAuditLog);
-        patchMaster((prev) => ({
-          ...prev,
-          clashes: mergeById(prev.clashes, [toClash(detail)]),
-          comments: mergeById(prev.comments, comments),
-          auditLogs: mergeById(prev.auditLogs, auditLogs),
-        }));
-        setSyncError(null);
-      } catch (error) {
-        setSyncError(messageOf(error));
-      }
-    },
-    [patchMaster]
   );
 
   // --- Project --------------------------------------------------------------
@@ -659,7 +669,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       zones: master?.zones ?? [],
       statuses: master?.statuses ?? [],
       priorities: master?.priorities ?? [],
-      clashes: master?.clashes ?? [],
+      clashesById: master?.clashesById ?? {},
       comments: master?.comments ?? [],
       auditLogs: master?.auditLogs ?? [],
       attachments: local?.attachments ?? [],

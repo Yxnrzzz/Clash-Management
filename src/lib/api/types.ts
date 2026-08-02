@@ -96,3 +96,32 @@ export interface ApiClashDetail extends ApiClash {
   comments: ApiComment[];
   auditLogs: ApiAuditLog[];
 }
+
+export interface ApiClashListResponse {
+  data: ApiClash[];
+  total: number;
+}
+
+export interface ApiSlice {
+  id: string;
+  label: string;
+  value: number;
+}
+
+export interface ApiTrendPoint {
+  weekStart: string;
+  createdCount: number;
+  closedCount: number;
+}
+
+export interface ApiDashboardMetrics {
+  totalClash: number;
+  openCount: number;
+  closedCount: number;
+  overdueCount: number;
+  mttrDays: number | null;
+  trend: ApiTrendPoint[];
+  byDiscipline: ApiSlice[];
+  byPriority: ApiSlice[];
+  byZone: ApiSlice[];
+}
