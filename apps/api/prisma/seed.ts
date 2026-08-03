@@ -50,12 +50,16 @@ const ZONES = [
 ];
 
 const USERS = [
-  { id: 'u-eng', name: 'Dimas Prasetyo', email: 'engineer@clashhub.dev', role: Role.ENGINEER },
-  { id: 'u-coord', name: 'Siti Rahmawati', email: 'coordinator@clashhub.dev', role: Role.COORDINATOR },
-  { id: 'u-mgmt', name: 'Bambang Wijaya', email: 'management@clashhub.dev', role: Role.MANAGEMENT },
-  { id: 'u-admin', name: 'Admin ClashHub', email: 'admin@clashhub.dev', role: Role.ADMIN },
-  { id: 'u-eng2', name: 'Rizky Ananda', email: 'rizky@clashhub.dev', role: Role.ENGINEER },
-  { id: 'u-coord2', name: 'Putri Lestari', email: 'putri@clashhub.dev', role: Role.COORDINATOR },
+  { id: 'u-eng', name: 'Yanuar', email: 'engineer@clashhub.dev', role: Role.ENGINEER },
+  { id: 'u-coord', name: 'Priadi', email: 'coordinator@clashhub.dev', role: Role.COORDINATOR },
+  { id: 'u-mgmt', name: 'Jufo', email: 'management@clashhub.dev', role: Role.MANAGEMENT },
+  { id: 'u-admin', name: 'Arini', email: 'admin@clashhub.dev', role: Role.ADMIN },
+  { id: 'u-eng2', name: 'Rhendy', email: 'rhendy@clashhub.dev', role: Role.ENGINEER },
+  { id: 'u-eng3', name: 'Muhroji', email: 'muhroji@clashhub.dev', role: Role.ENGINEER },
+  { id: 'u-eng4', name: 'Hidir', email: 'hidir@clashhub.dev', role: Role.ENGINEER },
+  { id: 'u-eng5', name: 'Zaky', email: 'zaky@clashhub.dev', role: Role.ENGINEER },
+  { id: 'u-eng6', name: 'Apri', email: 'apri@clashhub.dev', role: Role.ENGINEER },
+  { id: 'u-eng7', name: 'Rafi', email: 'rafi@clashhub.dev', role: Role.ENGINEER },
 ];
 
 /**
@@ -85,8 +89,9 @@ const CLASH_TITLES = [
 const CLASH_DESCRIPTION =
   'Hasil koordinasi model menunjukkan potensi bentrok antar elemen pada zona ini. Perlu verifikasi lapangan dan revisi shop drawing sebelum instalasi lanjutan.';
 
-const REPORTER_IDS = ['u-eng', 'u-eng2', 'u-coord', 'u-coord2'];
-const ASSIGNEE_IDS: (string | null)[] = ['u-eng', 'u-eng2', 'u-coord', 'u-coord2', null];
+const ENGINEER_IDS = ['u-eng', 'u-eng2', 'u-eng3', 'u-eng4', 'u-eng5', 'u-eng6', 'u-eng7'];
+const REPORTER_IDS = [...ENGINEER_IDS, 'u-coord'];
+const ASSIGNEE_IDS: (string | null)[] = [...ENGINEER_IDS, 'u-coord', null];
 
 function mulberry32(seed: number) {
   return function random() {
