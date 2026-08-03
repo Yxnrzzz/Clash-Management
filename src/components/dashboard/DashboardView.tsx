@@ -16,23 +16,18 @@ import {
 } from "recharts";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
-import { PROJECT, STATUSES } from "@/lib/mock-data";
 import {
-  computeMetrics,
   RANGE_PRESETS,
   resolveRange,
+  type DashboardMetrics,
   type RangePreset,
   type Slice,
 } from "@/lib/dashboard-metrics";
+import { apiGet, ApiError } from "@/lib/api/client";
+import { toDashboardMetrics } from "@/lib/api/mappers";
+import type { ApiDashboardMetrics } from "@/lib/api/types";
 import { ChartCard, formatNumber, LegendKey, StatTile, VizTooltip } from "./ChartPieces";
 import { AXIS_TICK, VIZ } from "./viz-tokens";
-
-const OPEN_STATUS_QUERY = STATUSES.filter((s) => !s.isClosedState)
-  .map((s) => s.id)
-  .join(",");
-const CLOSED_STATUS_QUERY = STATUSES.filter((s) => s.isClosedState)
-  .map((s) => s.id)
-  .join(",");
 
 interface DashFilters {
   preset: RangePreset;
@@ -67,8 +62,17 @@ const Y_TICK = { ...AXIS_TICK, style: { fontVariantNumeric: "tabular-nums" as co
 
 export function DashboardView() {
   const { user, isLoading } = useRequireAuth();
-  const { clashes } = useData();
+  const { project, statuses } = useData();
   const router = useRouter();
+
+  const openStatusQuery = useMemo(
+    () => statuses.filter((s) => !s.isClosedState).map((s) => s.id).join(","),
+    [statuses]
+  );
+  const closedStatusQuery = useMemo(
+    () => statuses.filter((s) => s.isClosedState).map((s) => s.id).join(","),
+    [statuses]
+  );
 
   const [filters, setFilters] = useState<DashFilters>(DEFAULT_DASH_FILTERS);
   const [showTable, setShowTable] = useState(false);
@@ -88,10 +92,42 @@ export function DashboardView() {
     return () => clearTimeout(t);
   }, [filters]);
 
-  const metrics = useMemo(() => {
-    const range = resolveRange(filters.preset, filters.from, filters.to);
-    return computeMetrics(clashes, range);
-  }, [clashes, filters]);
+  // KPIs/trend/slices are computed server-side (see HANDOFF.md §12) — this
+  // effect is the dashboard's only data fetch, debounced the same way the
+  // URL sync above is so a burst of range-picker clicks coalesces into one
+  // request.
+  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
+  const [metricsLoading, setMetricsLoading] = useState(true);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!hydrated.current) return;
+    let cancelled = false;
+    const timeout = setTimeout(() => {
+      setMetricsLoading(true);
+      const range = resolveRange(filters.preset, filters.from, filters.to);
+      const params = new URLSearchParams();
+      if (range.start) params.set("from", range.start.toISOString());
+      params.set("to", range.end.toISOString());
+      apiGet<ApiDashboardMetrics>(`/clashes/metrics?${params.toString()}`)
+        .then((res) => {
+          if (cancelled) return;
+          setMetrics(toDashboardMetrics(res));
+          setMetricsError(null);
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          setMetricsError(error instanceof ApiError ? error.message : "Gagal memuat data dashboard.");
+        })
+        .finally(() => {
+          if (!cancelled) setMetricsLoading(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [filters]);
 
   const drillTo = useCallback(
     (key: string) => (entry: unknown) => {
@@ -117,6 +153,18 @@ export function DashboardView() {
     );
   }
 
+  if (!metrics) {
+    return (
+      <div className="p-8 text-sm text-zinc-500">
+        {metricsError ? (
+          <p className="rounded-lg bg-red-50 px-3 py-2 text-red-600">{metricsError}</p>
+        ) : (
+          "Memuat…"
+        )}
+      </div>
+    );
+  }
+
   const sliceTable = (rows: Slice[]) => ({
     columns: ["Kategori", "Jumlah"],
     rows: rows.map((r) => [r.label, r.value] as (string | number)[]),
@@ -128,7 +176,7 @@ export function DashboardView() {
     <div className="mx-auto max-w-7xl px-6 py-8">
       <div className="mb-1 flex items-baseline justify-between">
         <h1 className="text-xl font-semibold text-zinc-900">Dashboard Manajemen</h1>
-        <span className="text-xs text-zinc-400">Read-only</span>
+        <span className="text-xs text-zinc-400">{metricsLoading ? "Memperbarui…" : "Read-only"}</span>
       </div>
       <p className="text-sm text-zinc-500">
         Ringkasan kesehatan proyek. Klik kartu atau batang chart untuk membuka register terfilter.
@@ -141,12 +189,12 @@ export function DashboardView() {
             Proyek
           </label>
           <select
-            value={PROJECT.id}
+            value={project.id}
             disabled
             className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-700 disabled:opacity-70"
           >
-            <option value={PROJECT.id}>
-              {PROJECT.kode} — {PROJECT.nama}
+            <option value={project.id}>
+              {project.kode} — {project.nama}
             </option>
           </select>
         </div>
@@ -208,18 +256,22 @@ export function DashboardView() {
         </label>
       </div>
 
+      {metricsError && (
+        <p className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{metricsError}</p>
+      )}
+
       <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-5">
         <StatTile label="Total clash" value={formatNumber(metrics.totalClash)} href="/register" />
         <StatTile
           label="Belum selesai"
           value={formatNumber(metrics.openCount)}
           caption="Open · In Progress · Resolved"
-          href={`/register?stat=${OPEN_STATUS_QUERY}`}
+          href={`/register?stat=${openStatusQuery}`}
         />
         <StatTile
           label="Closed"
           value={formatNumber(metrics.closedCount)}
-          href={`/register?stat=${CLOSED_STATUS_QUERY}`}
+          href={`/register?stat=${closedStatusQuery}`}
         />
         <StatTile
           label="Overdue"

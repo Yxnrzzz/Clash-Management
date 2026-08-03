@@ -1,0 +1,218 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ENGINEER
+  COORDINATOR
+  MANAGEMENT
+  ADMIN
+}
+
+enum NotificationChannel {
+  EMAIL
+  WHATSAPP
+}
+
+enum NotificationType {
+  ASSIGNED
+  STATUS_CHANGE
+  OVERDUE
+}
+
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  projectMemberships      ProjectMember[]
+  reportedClashes         Clash[]                  @relation("ClashReporter")
+  assignedClashes         Clash[]                  @relation("ClashAssignee")
+  uploadedAttachments     Attachment[]
+  comments                Comment[]
+  auditLogs               AuditLog[]
+  notifications           Notification[]
+  notificationPreference  NotificationPreference?
+}
+
+model Project {
+  id        String   @id @default(uuid())
+  name      String
+  code      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members     ProjectMember[]
+  disciplines Discipline[]
+  zones       Zone[]
+  clashes     Clash[]
+}
+
+model ProjectMember {
+  id          String   @id @default(uuid())
+  projectId   String
+  userId      String
+  projectRole String
+  joinedAt    DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([projectId, userId])
+}
+
+model Discipline {
+  id        String  @id @default(uuid())
+  projectId String
+  code      String
+  name      String
+  isActive  Boolean @default(true)
+
+  project Project @relation(fields: [projectId], references: [id])
+  clashes Clash[]
+
+  @@unique([projectId, code])
+}
+
+model Zone {
+  id        String  @id @default(uuid())
+  projectId String
+  name      String
+  level     String
+  isActive  Boolean @default(true)
+
+  project Project @relation(fields: [projectId], references: [id])
+  clashes Clash[]
+}
+
+model Status {
+  id            String  @id @default(uuid())
+  name          String
+  sequence      Int
+  isClosedState Boolean @default(false)
+
+  clashes Clash[]
+}
+
+model Priority {
+  id       String  @id @default(uuid())
+  name     String
+  weight   Int
+  isActive Boolean @default(true)
+
+  clashes Clash[]
+}
+
+model Clash {
+  id           String    @id @default(uuid())
+  uniqueCode   String    @unique
+  projectId    String
+  title        String
+  description  String
+  disciplineId String
+  zoneId       String
+  statusId     String
+  priorityId   String
+  reporterId   String
+  assigneeId   String?
+  dueDate      DateTime?
+  createdAt    DateTime  @default(now())
+  closedAt     DateTime?
+
+  project    Project    @relation(fields: [projectId], references: [id])
+  discipline Discipline @relation(fields: [disciplineId], references: [id])
+  zone       Zone       @relation(fields: [zoneId], references: [id])
+  status     Status     @relation(fields: [statusId], references: [id])
+  priority   Priority   @relation(fields: [priorityId], references: [id])
+  reporter   User       @relation("ClashReporter", fields: [reporterId], references: [id])
+  assignee   User?      @relation("ClashAssignee", fields: [assigneeId], references: [id])
+
+  attachments   Attachment[]
+  comments      Comment[]
+  auditLogs     AuditLog[]
+  notifications Notification[]
+
+  // Replaces a single 8-column composite index that only ever served queries
+  // prefixed by projectId. These four match the Register's actual filter/sort
+  // patterns (default list order, status chips, "my clashes", due-date sort).
+  @@index([projectId, createdAt])
+  @@index([projectId, statusId])
+  @@index([projectId, assigneeId])
+  @@index([projectId, dueDate])
+}
+
+model Attachment {
+  id           String   @id @default(uuid())
+  clashId      String
+  fileName     String
+  fileUrl      String
+  fileType     String
+  sizeBytes    Int
+  uploadedById String
+  createdAt    DateTime @default(now())
+
+  clash      Clash @relation(fields: [clashId], references: [id])
+  uploadedBy User  @relation(fields: [uploadedById], references: [id])
+}
+
+model Comment {
+  id        String   @id @default(uuid())
+  clashId   String
+  authorId  String
+  content   String
+  createdAt DateTime @default(now())
+
+  clash  Clash @relation(fields: [clashId], references: [id])
+  author User  @relation(fields: [authorId], references: [id])
+
+  @@index([clashId, createdAt])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  clashId   String
+  actorId   String
+  action    String
+  field     String?
+  oldValue  String?
+  newValue  String?
+  createdAt DateTime @default(now())
+
+  clash Clash @relation(fields: [clashId], references: [id])
+  actor User  @relation(fields: [actorId], references: [id])
+
+  @@index([clashId, createdAt])
+}
+
+model Notification {
+  id        String              @id @default(uuid())
+  userId    String
+  clashId   String
+  channel   NotificationChannel
+  type      NotificationType
+  isSent    Boolean
+  createdAt DateTime            @default(now())
+
+  user  User  @relation(fields: [userId], references: [id])
+  clash Clash @relation(fields: [clashId], references: [id])
+}
+
+model NotificationPreference {
+  id              String  @id @default(uuid())
+  userId          String  @unique
+  emailEnabled    Boolean @default(true)
+  whatsappEnabled Boolean @default(false)
+  whatsappNumber  String  @default("")
+
+  user User @relation(fields: [userId], references: [id])
+}

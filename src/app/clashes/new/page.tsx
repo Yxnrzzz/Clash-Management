@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { z } from "zod";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
-import { DISCIPLINES, PRIORITIES, ZONES } from "@/lib/mock-data";
 import { formatBytes } from "@/lib/lookup";
 
 const MAX_FILE_MB = 10;
@@ -31,7 +30,10 @@ interface PendingFile {
 
 export default function NewClashPage() {
   const { user, isLoading } = useRequireAuth();
-  const { createClash } = useData();
+  const { createClash, disciplines, zones, priorities } = useData();
+  const activeDisciplines = disciplines.filter((d) => d.isActive);
+  const activeZones = zones.filter((z) => z.isActive);
+  const activePriorities = priorities.filter((p) => p.isActive);
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -47,6 +49,8 @@ export default function NewClashPage() {
   const [files, setFiles] = useState<PendingFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [submitted, setSubmitted] = useState<{ kodeUnik: string; id: string } | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   if (isLoading || !user) {
     return <div className="p-8 text-sm text-zinc-500">Memuat…</div>;
@@ -87,7 +91,7 @@ export default function NewClashPage() {
     setFiles((prev) => prev.filter((_, i) => i !== index));
   }
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const result = clashSchema.safeParse(values);
     if (!result.success) {
@@ -103,24 +107,33 @@ export default function NewClashPage() {
       return;
     }
     setErrors({});
+    setSubmitError(null);
+    setIsSubmitting(true);
 
-    const clash = createClash(
-      {
-        judul: result.data.judul,
-        disciplineId: result.data.disciplineId,
-        zoneId: result.data.zoneId,
-        priorityId: result.data.priorityId,
-        deskripsi: result.data.deskripsi,
-        dueDate: result.data.dueDate || undefined,
-        attachments: files.map((f) => ({
-          namaFile: f.file.name,
-          tipe: f.file.type === "application/pdf" ? "pdf" : "image",
-          ukuranBytes: f.file.size,
-        })),
-      },
-      reporterId
-    );
-    setSubmitted({ kodeUnik: clash.kodeUnik, id: clash.id });
+    try {
+      const clash = await createClash(
+        {
+          judul: result.data.judul,
+          disciplineId: result.data.disciplineId,
+          zoneId: result.data.zoneId,
+          priorityId: result.data.priorityId,
+          deskripsi: result.data.deskripsi,
+          dueDate: result.data.dueDate || undefined,
+          attachments: files.map((f) => ({
+            namaFile: f.file.name,
+            tipe: f.file.type === "application/pdf" ? "pdf" : "image",
+            ukuranBytes: f.file.size,
+            file: f.file,
+          })),
+        },
+        reporterId
+      );
+      setSubmitted({ kodeUnik: clash.kodeUnik, id: clash.id });
+    } catch {
+      setSubmitError("Gagal membuat clash. Periksa koneksi dan coba lagi.");
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   const hasFileErrors = files.some((f) => f.error);
@@ -190,7 +203,7 @@ export default function NewClashPage() {
               }`}
             >
               <option value="">Pilih disiplin</option>
-              {DISCIPLINES.map((d) => (
+              {activeDisciplines.map((d) => (
                 <option key={d.id} value={d.id}>
                   {d.kode} — {d.nama}
                 </option>
@@ -209,7 +222,7 @@ export default function NewClashPage() {
               }`}
             >
               <option value="">Pilih zona</option>
-              {ZONES.map((z) => (
+              {activeZones.map((z) => (
                 <option key={z.id} value={z.id}>
                   {z.level} · {z.nama}
                 </option>
@@ -228,7 +241,7 @@ export default function NewClashPage() {
               }`}
             >
               <option value="">Pilih prioritas</option>
-              {PRIORITIES.map((p) => (
+              {activePriorities.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.nama}
                 </option>
@@ -332,6 +345,10 @@ export default function NewClashPage() {
           )}
         </div>
 
+        {submitError && (
+          <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{submitError}</p>
+        )}
+
         <div className="flex justify-end gap-3 border-t border-zinc-100 pt-5">
           <button
             type="button"
@@ -342,10 +359,10 @@ export default function NewClashPage() {
           </button>
           <button
             type="submit"
-            disabled={hasFileErrors}
+            disabled={hasFileErrors || isSubmitting}
             className="rounded-lg bg-zinc-900 px-5 py-2 text-sm font-semibold text-white hover:bg-zinc-800 disabled:opacity-40"
           >
-            Submit Clash
+            {isSubmitting ? "Menyimpan…" : "Submit Clash"}
           </button>
         </div>
       </form>

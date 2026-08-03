@@ -1,194 +1,734 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { DISCIPLINES, generateSeedData, PROJECT, STATUSES } from "./mock-data";
-import type { AuditLogEntry, Attachment, Clash, Comment, NewClashInput } from "./types";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { apiGet, apiPatch, apiPost } from "./api/client";
+import {
+  disciplinePayload,
+  newClashPayload,
+  priorityPayload,
+  projectPayload,
+  statusPayload,
+  toAuditLog,
+  toClash,
+  toComment,
+  toDiscipline,
+  toPriority,
+  toProject,
+  toStatus,
+  toUser,
+  toZone,
+  userPayload,
+  zonePayload,
+  type ClashFieldPatch,
+} from "./api/mappers";
+import type {
+  ApiClash,
+  ApiClashDetail,
+  ApiComment,
+  ApiDiscipline,
+  ApiPriority,
+  ApiProject,
+  ApiStatus,
+  ApiUser,
+  ApiZone,
+} from "./api/types";
+import type {
+  AuditLogEntry,
+  Attachment,
+  Clash,
+  Comment,
+  Discipline,
+  NewClashInput,
+  NotificationPreference,
+  Priority,
+  Project,
+  Status,
+  User,
+  Zone,
+} from "./types";
 
-const STORAGE_KEY = "clashhub-data-v1";
+/**
+ * Post-hybrid phase (Sprint 2-4): master data — project, users, disciplines,
+ * zones, statuses, priorities — plus clashes, comments and audit logs are all
+ * served by the NestJS API. Only attachments and notification preferences
+ * still live in localStorage: attachments because object storage doesn't
+ * exist yet (deferred, see HANDOFF.md), notification preferences because the
+ * notifications module hasn't been built.
+ *
+ * Comments and audit logs are loaded lazily per clash via loadClashDetail()
+ * rather than in the initial batch fetch — the list view never needs them,
+ * only the detail page does.
+ *
+ * Clashes are NOT bulk-loaded here (see clashesById below) — Register,
+ * Dashboard, "Clash Saya", and the detail page each fetch exactly what they
+ * need directly from /clashes, since the whole point of server-side
+ * filter/sort/pagination is to stop shipping every clash to the browser on
+ * every login (see HANDOFF.md §12).
+ */
 
-interface StoredState {
-  clashes: Clash[];
-  comments: Comment[];
-  auditLogs: AuditLogEntry[];
+const STORAGE_KEY = "clashhub-data-v4";
+
+/** How long a keystroke-driven edit waits before it is PATCHed to the server. */
+const PATCH_DEBOUNCE_MS = 500;
+
+const EMPTY_PROJECT: Project = { id: "", nama: "", kode: "" };
+
+/** The half still persisted in the browser (no backend module yet). */
+interface LocalState {
   attachments: Attachment[];
+  notificationPreferences: NotificationPreference[];
 }
 
-interface DataContextValue extends StoredState {
+/** The half that comes from the API. */
+interface MasterState {
+  project: Project;
+  users: User[];
+  disciplines: Discipline[];
+  zones: Zone[];
+  statuses: Status[];
+  priorities: Priority[];
+  /**
+   * A small on-demand cache, NOT the full clash list — populated by
+   * loadClashDetail(), createClash(), and updateClashField() as pages touch
+   * individual clashes. Register/Dashboard/"Clash Saya" fetch their own data
+   * straight from /clashes and don't read this.
+   */
+  clashesById: Record<string, Clash>;
+  /** Populated lazily, clash by clash, via loadClashDetail(). */
+  comments: Comment[];
+  auditLogs: AuditLogEntry[];
+}
+
+type ClashEditableField = "assigneeId" | "priorityId" | "dueDate" | "statusId";
+
+interface DataContextValue extends LocalState, MasterState {
   isLoading: boolean;
-  createClash: (input: NewClashInput, reporterId: string) => Clash;
+  /** Last failed server write, if any — the optimistic edit has been rolled back. */
+  syncError: string | null;
+  /** Object URLs for attachments uploaded THIS session — never persisted
+   * (blob: URLs and File objects cannot survive a reload without a real
+   * backend). Attachments created in a previous session show no preview. */
+  attachmentPreviewUrls: Record<string, string>;
+
+  /** Called by AuthProvider once a session is established (or restored). */
+  reloadMasterData: () => Promise<void>;
+  /** Called by AuthProvider on sign-out or when no session could be restored. */
+  clearMasterData: () => void;
+  /** Fetches one clash's comments + audit log and merges them into context. */
+  loadClashDetail: (clashId: string) => Promise<void>;
+
+  createClash: (input: NewClashInput, reporterId: string) => Promise<Clash>;
   updateClashField: (
     clashId: string,
-    field: "assigneeId" | "priorityId" | "dueDate" | "statusId",
+    field: ClashEditableField,
     newValue: string | null,
     actorId: string
+  ) => Promise<void>;
+  bulkUpdateClashes: (
+    ids: string[],
+    patch: Partial<Record<ClashEditableField, string | null>>,
+    actorId: string
+  ) => Promise<{ updated: number }>;
+  addComment: (clashId: string, authorId: string, isi: string) => Promise<void>;
+
+  updateProject: (patch: Partial<Pick<Project, "nama" | "kode">>) => void;
+
+  createUser: (input: Pick<User, "nama" | "email" | "peran">) => Promise<User>;
+  updateUser: (id: string, patch: Partial<Pick<User, "nama" | "email" | "peran">>) => void;
+  toggleUserActive: (id: string) => void;
+
+  createDiscipline: (input: Pick<Discipline, "kode" | "nama">) => Promise<Discipline>;
+  updateDiscipline: (id: string, patch: Partial<Pick<Discipline, "kode" | "nama">>) => void;
+  toggleDisciplineActive: (id: string) => void;
+
+  createZone: (input: Pick<Zone, "nama" | "level">) => Promise<Zone>;
+  updateZone: (id: string, patch: Partial<Pick<Zone, "nama" | "level">>) => void;
+  toggleZoneActive: (id: string) => void;
+
+  createPriority: (input: Pick<Priority, "nama" | "bobot">) => Promise<Priority>;
+  updatePriority: (id: string, patch: Partial<Pick<Priority, "nama" | "bobot">>) => void;
+  togglePriorityActive: (id: string) => void;
+
+  updateStatus: (id: string, patch: Partial<Pick<Status, "nama" | "isClosedState">>) => void;
+
+  setNotificationPreference: (
+    userId: string,
+    patch: Partial<Omit<NotificationPreference, "userId">>
   ) => void;
-  addComment: (clashId: string, authorId: string, isi: string) => void;
 }
 
 const DataContext = createContext<DataContextValue | null>(null);
 
-function loadInitial(): StoredState {
-  return generateSeedData();
+function loadInitialLocal(): LocalState {
+  return { attachments: [], notificationPreferences: [] };
+}
+
+/** Merges `incoming` into `existing` by id, incoming wins on conflict. */
+function mergeById<T extends { id: string }>(existing: T[], incoming: T[]): T[] {
+  const map = new Map(existing.map((item) => [item.id, item]));
+  for (const item of incoming) map.set(item.id, item);
+  return Array.from(map.values());
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : "Gagal menyimpan perubahan ke server.";
 }
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<StoredState | null>(null);
+  const [local, setLocal] = useState<LocalState | null>(null);
+  const [master, setMaster] = useState<MasterState | null>(null);
+  const [masterResolved, setMasterResolved] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [attachmentPreviewUrls, setAttachmentPreviewUrls] = useState<Record<string, string>>({});
 
   useEffect(() => {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (raw) {
       try {
         // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time hydration from localStorage, client-only
-        setState(JSON.parse(raw) as StoredState);
+        setLocal(JSON.parse(raw) as LocalState);
         return;
       } catch {
         // fall through to seed
       }
     }
-    setState(loadInitial());
+    setLocal(loadInitialLocal());
   }, []);
 
   useEffect(() => {
-    if (state) {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    if (local) {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(local));
     }
-  }, [state]);
+  }, [local]);
 
-  const createClash = useCallback((input: NewClashInput, reporterId: string): Clash => {
-    let created!: Clash;
-    setState((prev) => {
-      const base = prev ?? loadInitial();
-      const discipline = DISCIPLINES.find((d) => d.id === input.disciplineId)!;
-      const countExisting = base.clashes.filter((c) => c.disciplineId === input.disciplineId).length;
-      const kodeUnik = `${PROJECT.kode}-${discipline.kode}-${String(countExisting + 1).padStart(4, "0")}`;
-      const nowIso = new Date().toISOString();
-      const openStatus = STATUSES[0];
-
-      created = {
-        id: `clash-${Date.now()}`,
-        kodeUnik,
-        projectId: PROJECT.id,
-        judul: input.judul,
-        deskripsi: input.deskripsi,
-        disciplineId: input.disciplineId,
-        zoneId: input.zoneId,
-        statusId: openStatus.id,
-        priorityId: input.priorityId,
-        reporterId,
-        assigneeId: null,
-        dueDate: input.dueDate ? new Date(input.dueDate).toISOString() : null,
-        createdAt: nowIso,
-        closedAt: null,
-      };
-
-      const auditEntry: AuditLogEntry = {
-        id: `audit-${created.id}-created`,
-        clashId: created.id,
-        actorId: reporterId,
-        aksi: "created",
-        createdAt: nowIso,
-      };
-
-      const newAttachments: Attachment[] = input.attachments.map((a, idx) => ({
-        id: `att-${created.id}-${idx}`,
-        clashId: created.id,
-        namaFile: a.namaFile,
-        tipe: a.tipe,
-        ukuranBytes: a.ukuranBytes,
-        uploadedBy: reporterId,
-        createdAt: nowIso,
-      }));
-
-      return {
-        ...base,
-        clashes: [created, ...base.clashes],
-        auditLogs: [...base.auditLogs, auditEntry],
-        attachments: [...base.attachments, ...newAttachments],
-      };
-    });
-    return created;
+  // Revoke object URLs on unmount so the browser can reclaim the memory.
+  useEffect(() => {
+    return () => {
+      Object.values(attachmentPreviewUrls).forEach((url) => URL.revokeObjectURL(url));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const updateClashField = useCallback(
-    (
-      clashId: string,
-      field: "assigneeId" | "priorityId" | "dueDate" | "statusId",
-      newValue: string | null,
-      actorId: string
-    ) => {
-      setState((prev) => {
-        if (!prev) return prev;
-        const clash = prev.clashes.find((c) => c.id === clashId);
-        if (!clash) return prev;
+  // --- Master data from the API --------------------------------------------
 
-        const oldValueRaw = clash[field];
-        if (oldValueRaw === newValue) return prev;
+  const reloadMasterData = useCallback(async () => {
+    try {
+      const [project, users, disciplines, zones, statuses, priorities] = await Promise.all([
+        apiGet<ApiProject>("/projects/current"),
+        apiGet<ApiUser[]>("/users"),
+        apiGet<ApiDiscipline[]>("/master-data/disciplines"),
+        apiGet<ApiZone[]>("/master-data/zones"),
+        apiGet<ApiStatus[]>("/master-data/statuses"),
+        apiGet<ApiPriority[]>("/master-data/priorities"),
+      ]);
 
-        const nowIso = new Date().toISOString();
-        const updatedClash: Clash = { ...clash, [field]: newValue };
+      setMaster({
+        project: toProject(project),
+        users: users.map(toUser),
+        disciplines: disciplines.map(toDiscipline),
+        zones: zones.map(toZone),
+        statuses: statuses.map(toStatus),
+        priorities: priorities.map(toPriority),
+        clashesById: {},
+        comments: [],
+        auditLogs: [],
+      });
+      setSyncError(null);
+    } catch (error) {
+      setSyncError(messageOf(error));
+    } finally {
+      setMasterResolved(true);
+    }
+  }, []);
 
-        if (field === "statusId") {
-          const newStatus = STATUSES.find((s) => s.id === newValue);
-          if (newStatus?.isClosedState) {
-            updatedClash.closedAt = nowIso;
-          } else {
-            updatedClash.closedAt = null;
-          }
-        }
+  const clearMasterData = useCallback(() => {
+    setMaster(null);
+    setMasterResolved(true);
+  }, []);
 
-        const labelFor = (f: typeof field, v: string | null) => {
-          if (v === null) return "-";
-          if (f === "statusId") return STATUSES.find((s) => s.id === v)?.nama ?? v;
-          return v;
-        };
+  /**
+   * Master-data edits are driven by onChange handlers on text inputs, so a
+   * request per keystroke is not an option. The optimistic update lands
+   * immediately and the PATCH is coalesced and delayed — the same approach the
+   * Register uses for its filter URL sync.
+   */
+  const pendingPatches = useRef(
+    new Map<string, { timer: ReturnType<typeof setTimeout>; body: Record<string, unknown> }>()
+  );
 
-        const auditEntry: AuditLogEntry = {
-          id: `audit-${clashId}-${Date.now()}`,
-          clashId,
-          actorId,
-          aksi: "updated",
-          field,
-          nilaiLama: labelFor(field, oldValueRaw as string | null),
-          nilaiBaru: labelFor(field, newValue),
+  useEffect(() => {
+    const pending = pendingPatches.current;
+    return () => {
+      pending.forEach(({ timer }) => clearTimeout(timer));
+      pending.clear();
+    };
+  }, []);
+
+  const schedulePatch = useCallback(
+    (key: string, path: string, body: Record<string, unknown>) => {
+      const existing = pendingPatches.current.get(key);
+      if (existing) clearTimeout(existing.timer);
+
+      const merged = { ...existing?.body, ...body };
+      const timer = setTimeout(() => {
+        pendingPatches.current.delete(key);
+        apiPatch(path, merged).catch((error: unknown) => {
+          setSyncError(messageOf(error));
+          // Server rejected it — pull the truth back so the UI stops lying.
+          void reloadMasterData();
+        });
+      }, PATCH_DEBOUNCE_MS);
+
+      pendingPatches.current.set(key, { timer, body: merged });
+    },
+    [reloadMasterData]
+  );
+
+  /** Applies an immediate optimistic change to one master-data collection. */
+  const patchMaster = useCallback((apply: (prev: MasterState) => MasterState) => {
+    setMaster((prev) => (prev ? apply(prev) : prev));
+  }, []);
+
+  /** Fires a write straight away (no debounce) and syncs from the response. */
+  const runWrite = useCallback(
+    async <T,>(write: () => Promise<T>, onSuccess: (result: T) => void): Promise<T> => {
+      try {
+        const result = await write();
+        onSuccess(result);
+        setSyncError(null);
+        return result;
+      } catch (error) {
+        setSyncError(messageOf(error));
+        throw error;
+      }
+    },
+    []
+  );
+
+  // --- Clashes ---------------------------------------------------------------
+
+  /**
+   * Creates the clash on the server (which assigns uniqueCode, default
+   * status, reporterId from the JWT, and writes the "created" audit row),
+   * then attaches whatever files were staged locally. Attachments stay
+   * client-only until object storage exists — see the Attachment type.
+   */
+  const createClash = useCallback(
+    async (input: NewClashInput, reporterId: string): Promise<Clash> => {
+      const createdApi = await runWrite(
+        () => apiPost<ApiClash>("/clashes", newClashPayload(input)),
+        (result) =>
+          patchMaster((prev) => ({
+            ...prev,
+            clashesById: { ...prev.clashesById, [result.id]: toClash(result) },
+          }))
+      );
+      const created = toClash(createdApi);
+
+      const newPreviewUrls: Record<string, string> = {};
+      const nowIso = new Date().toISOString();
+      const newAttachments: Attachment[] = input.attachments.map((a, idx) => {
+        const id = `att-${created.id}-${idx}`;
+        if (a.file) newPreviewUrls[id] = URL.createObjectURL(a.file);
+        return {
+          id,
+          clashId: created.id,
+          namaFile: a.namaFile,
+          tipe: a.tipe,
+          ukuranBytes: a.ukuranBytes,
+          uploadedBy: reporterId,
           createdAt: nowIso,
         };
+      });
 
+      if (newAttachments.length > 0) {
+        setLocal((prev) => {
+          const base = prev ?? loadInitialLocal();
+          return { ...base, attachments: [...base.attachments, ...newAttachments] };
+        });
+      }
+      if (Object.keys(newPreviewUrls).length) {
+        setAttachmentPreviewUrls((prev) => ({ ...prev, ...newPreviewUrls }));
+      }
+
+      return created;
+    },
+    [patchMaster, runWrite]
+  );
+
+  /** Fetches one clash's comments + audit log and merges them into context. */
+  const loadClashDetail = useCallback(
+    async (clashId: string): Promise<void> => {
+      try {
+        const detail = await apiGet<ApiClashDetail>(`/clashes/${clashId}`);
+        const comments = detail.comments.map(toComment);
+        const auditLogs = detail.auditLogs.map(toAuditLog);
+        patchMaster((prev) => ({
+          ...prev,
+          clashesById: { ...prev.clashesById, [clashId]: toClash(detail) },
+          comments: mergeById(prev.comments, comments),
+          auditLogs: mergeById(prev.auditLogs, auditLogs),
+        }));
+        setSyncError(null);
+      } catch (error) {
+        setSyncError(messageOf(error));
+      }
+    },
+    [patchMaster]
+  );
+
+  const updateClashField = useCallback(
+    async (
+      clashId: string,
+      field: ClashEditableField,
+      newValue: string | null,
+      _actorId: string
+    ): Promise<void> => {
+      // Actor is derived server-side from the JWT now; the parameter is kept
+      // so call sites (which still pass user.id for clarity) don't change.
+      void _actorId;
+      const patch: ClashFieldPatch = { [field]: newValue };
+      await runWrite(
+        () => apiPatch<ApiClash>(`/clashes/${clashId}`, patch),
+        (updated) =>
+          patchMaster((prev) => ({
+            ...prev,
+            clashesById: { ...prev.clashesById, [clashId]: toClash(updated) },
+          }))
+      );
+      // The PATCH response is just the updated clash row — the server-side
+      // AuditLog row it wrote isn't in it, so the Riwayat tab needs a
+      // follow-up fetch to see the new entry without a manual reload.
+      await loadClashDetail(clashId);
+    },
+    [patchMaster, runWrite, loadClashDetail]
+  );
+
+  /**
+   * Bulk can touch many rows at once, and none of them are necessarily in
+   * clashesById's small on-demand cache — so unlike the single-clash mutators
+   * above, this doesn't try to patch local state. RegisterView owns the page
+   * these ids came from and re-fetches it after this resolves.
+   */
+  const bulkUpdateClashes = useCallback(
+    async (
+      ids: string[],
+      patch: Partial<Record<ClashEditableField, string | null>>,
+      _actorId: string
+    ): Promise<{ updated: number }> => {
+      void _actorId;
+      return runWrite(
+        () => apiPost<{ updated: number }>("/clashes/bulk", { ids, patch }),
+        () => {}
+      );
+    },
+    [runWrite]
+  );
+
+  const addComment = useCallback(
+    async (clashId: string, _authorId: string, isi: string): Promise<void> => {
+      void _authorId;
+      await runWrite(
+        () => apiPost<ApiComment>(`/clashes/${clashId}/comments`, { content: isi }),
+        (created) =>
+          patchMaster((prev) => ({ ...prev, comments: [...prev.comments, toComment(created)] }))
+      );
+    },
+    [patchMaster, runWrite]
+  );
+
+  // --- Project --------------------------------------------------------------
+
+  const updateProject = useCallback(
+    (patch: Partial<Pick<Project, "nama" | "kode">>) => {
+      let projectId = "";
+      patchMaster((prev) => {
+        projectId = prev.project.id;
+        return { ...prev, project: { ...prev.project, ...patch } };
+      });
+      if (projectId) {
+        schedulePatch(`project:${projectId}`, `/projects/${projectId}`, projectPayload(patch));
+      }
+    },
+    [patchMaster, schedulePatch]
+  );
+
+  // --- Users ----------------------------------------------------------------
+
+  const createUser = useCallback(
+    (input: Pick<User, "nama" | "email" | "peran">): Promise<User> =>
+      runWrite(
+        () => apiPost<ApiUser>("/users", userPayload(input)),
+        (created) =>
+          patchMaster((prev) => ({ ...prev, users: [...prev.users, toUser(created)] }))
+      ).then(toUser),
+    [patchMaster, runWrite]
+  );
+
+  const updateUser = useCallback(
+    (id: string, patch: Partial<Pick<User, "nama" | "email" | "peran">>) => {
+      patchMaster((prev) => ({
+        ...prev,
+        users: prev.users.map((u) => (u.id === id ? { ...u, ...patch } : u)),
+      }));
+      schedulePatch(`user:${id}`, `/users/${id}`, userPayload(patch));
+    },
+    [patchMaster, schedulePatch]
+  );
+
+  const toggleUserActive = useCallback(
+    (id: string) => {
+      let next = false;
+      patchMaster((prev) => ({
+        ...prev,
+        users: prev.users.map((u) => {
+          if (u.id !== id) return u;
+          next = !u.isActive;
+          return { ...u, isActive: next };
+        }),
+      }));
+      schedulePatch(`user-active:${id}`, `/users/${id}/active`, { isActive: next });
+    },
+    [patchMaster, schedulePatch]
+  );
+
+  // --- Disciplines ----------------------------------------------------------
+
+  const createDiscipline = useCallback(
+    (input: Pick<Discipline, "kode" | "nama">): Promise<Discipline> =>
+      runWrite(
+        () => apiPost<ApiDiscipline>("/master-data/disciplines", disciplinePayload(input)),
+        (created) =>
+          patchMaster((prev) => ({
+            ...prev,
+            disciplines: [...prev.disciplines, toDiscipline(created)],
+          }))
+      ).then(toDiscipline),
+    [patchMaster, runWrite]
+  );
+
+  const updateDiscipline = useCallback(
+    (id: string, patch: Partial<Pick<Discipline, "kode" | "nama">>) => {
+      patchMaster((prev) => ({
+        ...prev,
+        disciplines: prev.disciplines.map((d) => (d.id === id ? { ...d, ...patch } : d)),
+      }));
+      schedulePatch(
+        `discipline:${id}`,
+        `/master-data/disciplines/${id}`,
+        disciplinePayload(patch)
+      );
+    },
+    [patchMaster, schedulePatch]
+  );
+
+  const toggleDisciplineActive = useCallback(
+    (id: string) => {
+      let next = false;
+      patchMaster((prev) => ({
+        ...prev,
+        disciplines: prev.disciplines.map((d) => {
+          if (d.id !== id) return d;
+          next = !d.isActive;
+          return { ...d, isActive: next };
+        }),
+      }));
+      schedulePatch(`discipline-active:${id}`, `/master-data/disciplines/${id}/active`, {
+        isActive: next,
+      });
+    },
+    [patchMaster, schedulePatch]
+  );
+
+  // --- Zones ----------------------------------------------------------------
+
+  const createZone = useCallback(
+    (input: Pick<Zone, "nama" | "level">): Promise<Zone> =>
+      runWrite(
+        () => apiPost<ApiZone>("/master-data/zones", zonePayload(input)),
+        (created) => patchMaster((prev) => ({ ...prev, zones: [...prev.zones, toZone(created)] }))
+      ).then(toZone),
+    [patchMaster, runWrite]
+  );
+
+  const updateZone = useCallback(
+    (id: string, patch: Partial<Pick<Zone, "nama" | "level">>) => {
+      patchMaster((prev) => ({
+        ...prev,
+        zones: prev.zones.map((z) => (z.id === id ? { ...z, ...patch } : z)),
+      }));
+      schedulePatch(`zone:${id}`, `/master-data/zones/${id}`, zonePayload(patch));
+    },
+    [patchMaster, schedulePatch]
+  );
+
+  const toggleZoneActive = useCallback(
+    (id: string) => {
+      let next = false;
+      patchMaster((prev) => ({
+        ...prev,
+        zones: prev.zones.map((z) => {
+          if (z.id !== id) return z;
+          next = !z.isActive;
+          return { ...z, isActive: next };
+        }),
+      }));
+      schedulePatch(`zone-active:${id}`, `/master-data/zones/${id}/active`, { isActive: next });
+    },
+    [patchMaster, schedulePatch]
+  );
+
+  // --- Priorities -----------------------------------------------------------
+
+  const createPriority = useCallback(
+    (input: Pick<Priority, "nama" | "bobot">): Promise<Priority> =>
+      runWrite(
+        () => apiPost<ApiPriority>("/master-data/priorities", priorityPayload(input)),
+        (created) =>
+          patchMaster((prev) => ({ ...prev, priorities: [...prev.priorities, toPriority(created)] }))
+      ).then(toPriority),
+    [patchMaster, runWrite]
+  );
+
+  const updatePriority = useCallback(
+    (id: string, patch: Partial<Pick<Priority, "nama" | "bobot">>) => {
+      patchMaster((prev) => ({
+        ...prev,
+        priorities: prev.priorities.map((p) => (p.id === id ? { ...p, ...patch } : p)),
+      }));
+      schedulePatch(`priority:${id}`, `/master-data/priorities/${id}`, priorityPayload(patch));
+    },
+    [patchMaster, schedulePatch]
+  );
+
+  const togglePriorityActive = useCallback(
+    (id: string) => {
+      let next = false;
+      patchMaster((prev) => ({
+        ...prev,
+        priorities: prev.priorities.map((p) => {
+          if (p.id !== id) return p;
+          next = !p.isActive;
+          return { ...p, isActive: next };
+        }),
+      }));
+      schedulePatch(`priority-active:${id}`, `/master-data/priorities/${id}/active`, {
+        isActive: next,
+      });
+    },
+    [patchMaster, schedulePatch]
+  );
+
+  // --- Statuses -------------------------------------------------------------
+
+  const updateStatus = useCallback(
+    (id: string, patch: Partial<Pick<Status, "nama" | "isClosedState">>) => {
+      patchMaster((prev) => ({
+        ...prev,
+        statuses: prev.statuses.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+      }));
+      schedulePatch(`status:${id}`, `/master-data/statuses/${id}`, statusPayload(patch));
+    },
+    [patchMaster, schedulePatch]
+  );
+
+  // --- Notification preferences (still local) -------------------------------
+
+  const setNotificationPreference = useCallback(
+    (userId: string, patch: Partial<Omit<NotificationPreference, "userId">>) => {
+      setLocal((prev) => {
+        if (!prev) return prev;
+        const existing = prev.notificationPreferences.find((p) => p.userId === userId);
+        const next: NotificationPreference = existing
+          ? { ...existing, ...patch }
+          : { userId, emailEnabled: true, whatsappEnabled: false, whatsappNumber: "", ...patch };
         return {
           ...prev,
-          clashes: prev.clashes.map((c) => (c.id === clashId ? updatedClash : c)),
-          auditLogs: [...prev.auditLogs, auditEntry],
+          notificationPreferences: existing
+            ? prev.notificationPreferences.map((p) => (p.userId === userId ? next : p))
+            : [...prev.notificationPreferences, next],
         };
       });
     },
     []
   );
 
-  const addComment = useCallback((clashId: string, authorId: string, isi: string) => {
-    setState((prev) => {
-      if (!prev) return prev;
-      const comment: Comment = {
-        id: `comment-${clashId}-${Date.now()}`,
-        clashId,
-        authorId,
-        isi,
-        createdAt: new Date().toISOString(),
-      };
-      return { ...prev, comments: [...prev.comments, comment] };
-    });
-  }, []);
-
   const value = useMemo<DataContextValue>(
     () => ({
-      clashes: state?.clashes ?? [],
-      comments: state?.comments ?? [],
-      auditLogs: state?.auditLogs ?? [],
-      attachments: state?.attachments ?? [],
-      isLoading: state === null,
+      project: master?.project ?? EMPTY_PROJECT,
+      users: master?.users ?? [],
+      disciplines: master?.disciplines ?? [],
+      zones: master?.zones ?? [],
+      statuses: master?.statuses ?? [],
+      priorities: master?.priorities ?? [],
+      clashesById: master?.clashesById ?? {},
+      comments: master?.comments ?? [],
+      auditLogs: master?.auditLogs ?? [],
+      attachments: local?.attachments ?? [],
+      notificationPreferences: local?.notificationPreferences ?? [],
+      isLoading: local === null || !masterResolved,
+      syncError,
+      attachmentPreviewUrls,
+      reloadMasterData,
+      clearMasterData,
+      loadClashDetail,
       createClash,
       updateClashField,
+      bulkUpdateClashes,
       addComment,
+      updateProject,
+      createUser,
+      updateUser,
+      toggleUserActive,
+      createDiscipline,
+      updateDiscipline,
+      toggleDisciplineActive,
+      createZone,
+      updateZone,
+      toggleZoneActive,
+      createPriority,
+      updatePriority,
+      togglePriorityActive,
+      updateStatus,
+      setNotificationPreference,
     }),
-    [state, createClash, updateClashField, addComment]
+    [
+      local,
+      master,
+      masterResolved,
+      syncError,
+      attachmentPreviewUrls,
+      reloadMasterData,
+      clearMasterData,
+      loadClashDetail,
+      createClash,
+      updateClashField,
+      bulkUpdateClashes,
+      addComment,
+      updateProject,
+      createUser,
+      updateUser,
+      toggleUserActive,
+      createDiscipline,
+      updateDiscipline,
+      toggleDisciplineActive,
+      createZone,
+      updateZone,
+      toggleZoneActive,
+      createPriority,
+      updatePriority,
+      togglePriorityActive,
+      updateStatus,
+      setNotificationPreference,
+    ]
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

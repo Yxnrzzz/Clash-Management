@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: clashhub-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: clashuser
+      POSTGRES_PASSWORD: clashpass
+      POSTGRES_DB: clashhub_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - clashhub-postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: clashhub-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - clashhub-redis-data:/data
+
+volumes:
+  clashhub-postgres-data:
+  clashhub-redis-data:

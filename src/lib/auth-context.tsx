@@ -1,58 +1,91 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { USERS } from "./mock-data";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { useData } from "./data-context";
+import { login as apiLogin, logout as apiLogout, restoreSession } from "./api/client";
 import type { User } from "./types";
-
-const STORAGE_KEY = "clashhub-auth-user-id";
 
 interface AuthContextValue {
   user: User | null;
   isLoading: boolean;
-  login: (email: string, password: string) => { ok: true } | { ok: false; message: string };
-  logout: () => void;
+  login: (email: string, password: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+/**
+ * AuthProvider sits INSIDE DataProvider (see app/layout.tsx) and owns the
+ * session, while DataProvider owns the data the session unlocks. So the flow on
+ * boot is: try to restore a session from the httpOnly refresh cookie, then tell
+ * DataProvider to load master data — or to stay empty if there is no session.
+ */
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const { users, isLoading: dataLoading, reloadMasterData, clearMasterData } = useData();
+  const [userId, setUserId] = useState<string | null>(null);
+  const [bootstrapped, setBootstrapped] = useState(false);
 
   useEffect(() => {
-    const savedId = window.localStorage.getItem(STORAGE_KEY);
-    if (savedId) {
-      const found = USERS.find((u) => u.id === savedId) ?? null;
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time hydration from localStorage, client-only
-      setUser(found);
-    }
-    setIsLoading(false);
-  }, []);
+    let cancelled = false;
+
+    void (async () => {
+      const session = await restoreSession();
+      if (cancelled) return;
+
+      if (session) {
+        setUserId(session.user.id);
+        await reloadMasterData();
+      } else {
+        clearMasterData();
+      }
+      if (!cancelled) setBootstrapped(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadMasterData, clearMasterData]);
+
+  // Deriving `user` from the live `users` array (rather than storing the whole
+  // object) means a name/role change or deactivation from the Admin pages is
+  // reflected immediately — including logging the session out if an admin
+  // deactivates the account currently signed in.
+  const user = useMemo(() => {
+    if (!userId) return null;
+    const found = users.find((u) => u.id === userId);
+    return found && found.isActive ? found : null;
+  }, [userId, users]);
+
+  const login = useCallback(
+    async (email: string, password: string) => {
+      try {
+        const session = await apiLogin(email.trim(), password);
+        setUserId(session.user.id);
+        await reloadMasterData();
+        return { ok: true } as const;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Gagal masuk. Coba lagi beberapa saat lagi.";
+        return { ok: false, message } as const;
+      }
+    },
+    [reloadMasterData]
+  );
+
+  const logout = useCallback(async () => {
+    await apiLogout();
+    setUserId(null);
+    clearMasterData();
+  }, [clearMasterData]);
 
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
-      isLoading,
-      login: (email, password) => {
-        if (!password || password.length < 4) {
-          return { ok: false, message: "Password minimal 4 karakter." };
-        }
-        const found = USERS.find(
-          (u) => u.email.toLowerCase() === email.trim().toLowerCase() && u.isActive
-        );
-        if (!found) {
-          return { ok: false, message: "Email tidak ditemukan atau akun nonaktif." };
-        }
-        setUser(found);
-        window.localStorage.setItem(STORAGE_KEY, found.id);
-        return { ok: true };
-      },
-      logout: () => {
-        setUser(null);
-        window.localStorage.removeItem(STORAGE_KEY);
-      },
+      isLoading: !bootstrapped || dataLoading,
+      login,
+      logout,
     }),
-    [user, isLoading]
+    [user, bootstrapped, dataLoading, login, logout]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

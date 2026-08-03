@@ -1,35 +1,60 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRequireAuth } from "@/lib/use-require-auth";
-import { useData } from "@/lib/data-context";
-import {
-  disciplineById,
-  formatDate,
-  isOverdue,
-  priorityById,
-  statusById,
-  zoneById,
-} from "@/lib/lookup";
+import { useMasterDataLookups } from "@/lib/use-master-data";
+import { formatDate } from "@/lib/lookup";
+import { apiGet } from "@/lib/api/client";
+import { toClash } from "@/lib/api/mappers";
+import type { ApiClashListResponse } from "@/lib/api/types";
+import type { Clash } from "@/lib/types";
 import { PriorityBadge, StatusBadge, OverdueBadge } from "@/components/Badge";
 
 type Scope = "reported" | "assigned";
 
+// Not a stated NFR target for this page (unlike Register/Dashboard) — a flat
+// cap this generous is a pragmatic bound, not a real pagination UI.
+const MY_CLASHES_PAGE_SIZE = 500;
+
 export default function MyClashesPage() {
   const { user, isLoading } = useRequireAuth();
-  const { clashes } = useData();
+  const { disciplineById, zoneById, statusById, priorityById, isOverdue } = useMasterDataLookups();
   const [scope, setScope] = useState<Scope>("reported");
+  const [list, setList] = useState<Clash[]>([]);
+  const [listLoading, setListLoading] = useState(true);
 
-  const list = useMemo(() => {
-    if (!user) return [];
-    const filtered = clashes.filter((c) =>
-      scope === "reported" ? c.reporterId === user.id : c.assigneeId === user.id
-    );
-    return [...filtered].sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
-  }, [clashes, scope, user]);
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    // setListLoading is deferred a tick so it isn't a synchronous setState
+    // call in the effect body (react-hooks/set-state-in-effect) — same
+    // pattern RegisterView/DashboardView use for their fetch effects.
+    const timeout = setTimeout(() => {
+      setListLoading(true);
+      const params = new URLSearchParams({
+        sort: "createdAt",
+        dir: "desc",
+        pageSize: String(MY_CLASHES_PAGE_SIZE),
+      });
+      if (scope === "reported") params.set("reporterId", user.id);
+      else params.set("assignee", user.id);
+
+      apiGet<ApiClashListResponse>(`/clashes?${params.toString()}`)
+        .then((res) => {
+          if (cancelled) return;
+          setList(res.data.map(toClash));
+        })
+        .finally(() => {
+          if (!cancelled) setListLoading(false);
+        });
+    }, 0);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [scope, user]);
 
   if (isLoading || !user) {
     return <div className="p-8 text-sm text-zinc-500">Memuat…</div>;
@@ -64,7 +89,9 @@ export default function MyClashesPage() {
       </div>
 
       <div className="mt-4 overflow-hidden rounded-2xl border border-zinc-200 bg-white">
-        {list.length === 0 ? (
+        {listLoading ? (
+          <p className="p-8 text-center text-sm text-zinc-400">Memuat…</p>
+        ) : list.length === 0 ? (
           <p className="p-8 text-center text-sm text-zinc-400">
             Tidak ada clash pada kategori ini.
           </p>
