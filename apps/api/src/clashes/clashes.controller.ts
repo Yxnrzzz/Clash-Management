@@ -1,4 +1,19 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Res,
+  StreamableFile,
+  UploadedFiles,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FilesInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -12,6 +27,10 @@ import {
   UpdateClashDto,
 } from './dto/clash.dto';
 import { ClashesService } from './clashes.service';
+
+const MAX_ATTACHMENTS = 10;
+const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
+const ACCEPTED_ATTACHMENT_TYPES = ['image/', 'application/pdf'];
 
 /**
  * Reads are open to any signed-in user (Management needs the Register and
@@ -67,5 +86,42 @@ export class ClashesController {
     @CurrentUser() user: AuthUser,
   ) {
     return this.clashes.addComment(id, dto, user);
+  }
+
+  // Server-side re-validation of type/size/count: the frontend's own checks
+  // (clashes/new/page.tsx) are UX only, not a security boundary.
+  @Roles(Role.ENGINEER, Role.COORDINATOR, Role.ADMIN)
+  @Post(':id/attachments')
+  @UseInterceptors(
+    FilesInterceptor('files', MAX_ATTACHMENTS, { limits: { fileSize: MAX_ATTACHMENT_SIZE_BYTES } }),
+  )
+  addAttachments(
+    @Param('id') id: string,
+    @UploadedFiles() files: Express.Multer.File[],
+    @CurrentUser() user: AuthUser,
+  ) {
+    for (const file of files) {
+      if (!ACCEPTED_ATTACHMENT_TYPES.some((t) => file.mimetype.startsWith(t))) {
+        throw new BadRequestException('Tipe file harus gambar atau PDF');
+      }
+    }
+    return this.clashes.addAttachments(id, files, user);
+  }
+
+  @Get(':clashId/attachments/:attachmentId/download')
+  async downloadAttachment(
+    @Param('clashId') clashId: string,
+    @Param('attachmentId') attachmentId: string,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { attachment, stream } = await this.clashes.getAttachmentForDownload(
+      clashId,
+      attachmentId,
+    );
+    res.set({
+      'Content-Type': attachment.fileType,
+      'Content-Disposition': `inline; filename="${encodeURIComponent(attachment.fileName)}"`,
+    });
+    return new StreamableFile(stream);
   }
 }

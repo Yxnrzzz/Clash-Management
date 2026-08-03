@@ -1,7 +1,7 @@
 # ClashHub — Handoff Progress
 
-**Tanggal:** 2 Agustus 2026 (update ke-5)
-**Status:** Frontend selesai. **Sprint 1 + `ClashesModule` (Sprint 2/3/4) backend selesai dan tersambung**: auth JWT + argon2, RBAC, CRUD user/proyek/master-data, dan clash/komentar/audit log semuanya berjalan di NestJS + PostgreSQL dengan RBAC ditegakkan server-side. Fase hybrid **berakhir** untuk domain inti — hanya lampiran dan preferensi notifikasi yang masih di `localStorage` (menunggu object storage & modul notifikasi). **Update ke-5:** `GET /clashes` sekarang filter/sort/pagination server-side, dan `GET /clashes/metrics` (baru) menghitung KPI/tren/sebaran dashboard di server — lihat §12 lama, sekarang selesai. Konsekuensinya, `DataContext` tidak lagi memuat semua clash di bootstrap (lihat §5 "Clashes tidak lagi di-bulk-load").
+**Tanggal:** 3 Agustus 2026 (update ke-6)
+**Status:** Frontend selesai. **Sprint 0-4 backend selesai dan tersambung**: auth JWT + argon2, RBAC, CRUD user/proyek/master-data, clash/komentar/audit log, dan lampiran semuanya berjalan di NestJS + PostgreSQL (+ disk lokal untuk file) dengan RBAC ditegakkan server-side. Fase hybrid **berakhir untuk seluruh domain inti** — hanya preferensi notifikasi yang masih di `localStorage` (menunggu modul notifikasi). **Update ke-6:** lampiran (`Attachment`) pindah dari client-only/sesi-only ke object storage nyata di server (`StorageService`, disk lokal, S3/R2-ready) — lihat §5 "Lampiran: object storage lokal". Ini juga menghilangkan batasan lama "pratinjau tidak tersedia setelah reload". **Update ke-5** (sebelumnya): `GET /clashes` filter/sort/pagination server-side, dan `GET /clashes/metrics` menghitung KPI/tren/sebaran dashboard di server; `DataContext` tidak lagi memuat semua clash di bootstrap (lihat §5 "Clashes tidak lagi di-bulk-load").
 **Lokasi proyek:** `D:\WebApp`
 
 Dokumen ini untuk melanjutkan pengerjaan di sesi/chat baru. Baca ini dulu sebelum menulis kode.
@@ -128,7 +128,7 @@ apps/api/src/
 └── prisma/                       PrismaService
 ```
 
-**localStorage key:** `clashhub-data-v4` (naik dari v3 — clash/komentar/audit pindah ke API, bentuk `LocalState` menyusut jadi `{ attachments, notificationPreferences }`). Key `clashhub-auth-user-id` **sudah tidak dipakai** — sesi sekarang bersandar pada cookie `httpOnly` `clashhub_refresh`.
+**localStorage key:** `clashhub-data-v5` (naik dari v4 — lampiran pindah ke object storage server-side, bentuk `LocalState` menyusut jadi `{ notificationPreferences }` saja). Key `clashhub-auth-user-id` **sudah tidak dipakai** — sesi sekarang bersandar pada cookie `httpOnly` `clashhub_refresh`.
 
 ---
 
@@ -223,9 +223,13 @@ Sekarang `master.clashesById: Record<string, Clash>` — **cache kecil, bukan da
 
 **Audit log & `uniqueCode` dibuat server-side.** `nilaiLama`/`nilaiBaru` diterjemahkan ke nama (status/prioritas/assignee), bukan id mentah — supaya riwayat tetap terbaca meskipun id-nya bukan uuid. `uniqueCode` dihitung dalam transaksi dengan retry sekali kalau kena `P2002` (dua user membuat clash di disiplin yang sama bersamaan).
 
-### Lampiran: File asli, tapi sesi-only (belum berubah)
+### Lampiran: object storage lokal (update ke-6)
 
-`NewClashInput.attachments[].file?: File` — form input mengirim `File` sungguhan, bukan cuma metadata, tapi lampiran **belum** ikut pindah ke backend (`ClashesModule` sengaja tidak mencakup ini — lihat §12). Setelah clash dibuat di server, `data-context.tsx` men-generate `URL.createObjectURL()` per lampiran dan menyimpannya di `attachmentPreviewUrls` (state React biasa) + metadata lampiran di `localStorage`. Blob URL tidak valid lagi setelah reload. Halaman detail menampilkan thumbnail gambar + link unduh kalau preview URL tersedia; kalau tidak (lampiran lama / setelah reload), tampil pesan jujur "pratinjau tidak tersedia setelah reload".
+Lampiran sekarang benar-benar tersimpan di server, bukan lagi sesi-only. `NewClashInput.attachments[].file?: File` tidak berubah di form input, tapi `data-context.tsx`'s `createClash()` sekarang meng-upload file lewat `POST /clashes/:id/attachments` (multipart, `FilesInterceptor`) setelah clash-nya dibuat, alih-alih menulis metadata ke `localStorage`.
+
+Backend: `apps/api/src/storage/storage.service.ts` (`StorageService`) menyimpan file ke disk di bawah `UPLOAD_DIR` (default `./uploads` relatif ke `apps/api`, key `${clashId}/${uuid}-${namaFileAsli}`) — satu-satunya tempat yang tahu path filesystem-nya; sisa kode (controller/service/frontend) hanya berurusan dengan `Attachment.id`. Didesain sebagai seam tunggal untuk pindah ke S3/R2 nanti (ganti isi file ini saja). Validasi tipe/ukuran/jumlah file (`image/*`/`application/pdf`, maks 10 MB, maks 10 file) ditegakkan ulang di server (`ClashesController.addAttachments`) — cek di frontend (`clashes/new/page.tsx`) cuma UX.
+
+Unduh lewat `GET /clashes/:clashId/attachments/:attachmentId/download` (terbuka untuk semua user login, sama seperti `GET /clashes/:id`). Karena access token disimpan di memori (bukan cookie — lihat Gotcha #11), `<img src=...>`/`<a href=...>` biasa tidak bisa membawa header `Authorization`; jadi frontend selalu fetch lampiran lewat `apiDownloadBlob()` (`lib/api/client.ts`) lalu bikin `URL.createObjectURL()` dari `Blob`-nya. Ini dilakukan di `clashes/[id]/page.tsx` lewat `useEffect` yang jalan tiap kali attachment baru muncul — bukan lagi di `data-context.tsx` seperti sebelumnya — sehingga preview **selalu di-fetch ulang dari server**, bukan di-cache saat pembuatan. Konsekuensinya, batasan lama "pratinjau tidak tersedia setelah reload" **sudah tidak berlaku**.
 
 ---
 
@@ -250,7 +254,7 @@ Aturan terpusat di frontend: `src/lib/lookup.ts` (`canEditClash`, `canComment`) 
 |---|---|---|---|
 | 0 | Fondasi backend | ✅ Selesai | NestJS + Prisma + PostgreSQL, 2 migrasi ter-apply, seed idempoten, `/api/health` |
 | 1 | Auth, RBAC, Administrasi | ✅ Selesai | JWT + argon2id, RolesGuard/ProjectMemberGuard, CRUD user/proyek/master-data, **frontend tersambung**, 12 unit test lulus |
-| 2 | Input clash + lampiran | 🟢 Clash selesai, lampiran belum | Clash dari DB via `ClashesModule`; lampiran masih localStorage (belum ada object storage) |
+| 2 | Input clash + lampiran | ✅ Selesai | Clash dari DB via `ClashesModule`; lampiran tersimpan di disk lewat `StorageService` (update ke-6, lihat §5 "Lampiran") |
 | 3 | Clash Register | ✅ Selesai | Data clash dari DB, filter/sort/pagination server-side (`GET /clashes`, update ke-5) |
 | 4 | Detail, komentar, audit, triase | ✅ Selesai | Komentar & audit dari DB (lazy-load per clash), RBAC field-level di server, audit trail server-generated; tab Riwayat sekarang refresh otomatis setelah edit (`updateClashField` memanggil `loadClashDetail` — diperbaiki di commit `548db09`) |
 | 5 | Notifikasi email async | ❌ Belum | Butuh Redis + BullMQ (Redis ada di compose, belum dijalankan) |
@@ -303,7 +307,7 @@ c. **Prisma `ClashUpdateInput` (checked) tidak mengekspos field FK skalar** keti
 7. **Next 16 hanya izinkan satu instance `next dev`** per proyek (lockfile). Jangan jalankan dua dev server. Hal serupa berlaku untuk backend: proses `nest start --watch` yang menumpuk akan **mengunci `node_modules/.prisma/client/query_engine-windows.dll.node`** sehingga `npx prisma generate` gagal dengan `EPERM`. Kalau kena itu, matikan dulu semua proses node yang menunjuk ke `D:\WebApp`.
 8. **Warna chart divalidasi, bukan dikira-kira.** Kalau mengubah hex di `viz-tokens.ts`, jalankan ulang skill `dataviz` → `scripts/validate_palette.js`. Kategori nominal (disiplin, zona) pakai satu warna datar; hanya prioritas (tingkatan berurutan) yang boleh pakai ramp — dan array prioritas HARUS di-sort by `bobot` dulu sebelum dipetakan ke ramp (lihat §8.5).
 9. **Testing browser di lingkungan ini kadang menembak race condition palsu.** Firing beberapa `.click()` sinkron dalam satu loop tanpa `await`/delay antar klik bisa membuat elemen DOM lama (sebelum re-render React) jadi stale reference — hasilnya klik kelihatan "gagal" padahal app-nya benar. Selalu beri jeda kecil (~50ms) antar interaksi saat menguji lewat `javascript_tool`.
-10. **`localStorage` key sekarang `clashhub-data-v4`** (v1 → v2 saat master data jadi mutable, v2 → v3 saat master data pindah ke API, v3 → v4 saat clash/komentar/audit pindah ke API). Tidak ada migrasi: kalau `JSON.parse` gagal, data lama hilang dan di-seed ulang. Kalau mengubah bentuk `LocalState` lagi, naikkan versinya.
+10. **`localStorage` key sekarang `clashhub-data-v5`** (v1 → v2 saat master data jadi mutable, v2 → v3 saat master data pindah ke API, v3 → v4 saat clash/komentar/audit pindah ke API, v4 → v5 saat lampiran pindah ke object storage server-side). Tidak ada migrasi: kalau `JSON.parse` gagal, data lama hilang dan di-seed ulang. Kalau mengubah bentuk `LocalState` lagi, naikkan versinya.
 11. **Access token TIDAK boleh dipindah ke `localStorage`.** Sekarang disimpan di variabel modul `src/lib/api/client.ts` supaya tidak terbaca XSS; ketahanan sesi datang dari cookie refresh `httpOnly`, bukan dari menyimpan token di disk.
 12. **Jangan tambahkan CORS di backend.** `next.config.ts` mem-proxy `/api/*` ke `localhost:3001` lewat `rewrites`, jadi dari sisi browser semuanya same-origin dan cookie tetap first-party. Menambah CORS + `credentials: "include"` hanya akan menambah permukaan masalah tanpa manfaat.
 13. **Id master data (disiplin/zona/prioritas/status/user) BUKAN uuid untuk baris hasil seed** — jangan pakai `@IsUUID()` di DTO backend untuk field yang mereferensikannya. Lihat §5 dan §8a.
@@ -358,7 +362,7 @@ Drill-down dashboard → register memakai parameter yang sama (termasuk `overdue
 
 ## 12. Rekomendasi langkah berikutnya
 
-- **Object storage untuk lampiran (disk lokal dulu)** — prasyarat agar lampiran bertahan setelah reload (lihat §5 "Lampiran"). `Attachment.fileUrl` sudah ada di skema tapi belum ada yang mengisinya. Rencana: `apps/api/uploads/` + endpoint upload multipart + endpoint download terproteksi, di balik abstraksi storage supaya gampang pindah ke S3/R2 nanti.
+- ~~Object storage untuk lampiran (disk lokal dulu)~~ — **selesai (update ke-6)**, lihat §5 "Lampiran: object storage lokal". Masih S3/R2-ready lewat `StorageService`, belum ada implementasi cloud-nya — kerjakan itu kalau memang butuh multi-instance/deploy.
 - ~~Filter/sort/pagination server-side untuk `GET /clashes`~~ — **selesai (update ke-5)**, lihat §5 "Clashes tidak lagi di-bulk-load".
 - ~~Endpoint agregasi dashboard~~ — **selesai (update ke-5)**, `GET /clashes/metrics`.
 - **Verifikasi target performa PRD di data besar (masih relevan meski pagination sudah server-side)** — seed sekarang 87-90 clash; setelah update ke-5, `GET /clashes` dan `/clashes/metrics` sudah query Prisma langsung (bukan muat-semua-lalu-filter-di-JS), tapi belum ada index/query tuning khusus atau load test terhadap target 10.000 clash. Itu tetap pekerjaan Sprint 11.

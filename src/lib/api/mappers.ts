@@ -1,4 +1,5 @@
 import type {
+  Attachment,
   AuditLogEntry,
   Clash,
   Comment,
@@ -13,6 +14,7 @@ import type {
 } from "../types";
 import { WEEK_LABEL, type DashboardMetrics } from "../dashboard-metrics";
 import type {
+  ApiAttachment,
   ApiAuditLog,
   ApiClash,
   ApiComment,
@@ -159,6 +161,16 @@ export const toAuditLog = (a: ApiAuditLog): AuditLogEntry => ({
   field: a.field ?? undefined,
   nilaiLama: a.oldValue ?? undefined,
   nilaiBaru: a.newValue ?? undefined,
+  createdAt: a.createdAt,
+});
+
+export const toAttachment = (a: ApiAttachment): Attachment => ({
+  id: a.id,
+  clashId: a.clashId,
+  namaFile: a.fileName,
+  tipe: a.fileType.startsWith("image/") ? "image" : a.fileType === "application/pdf" ? "pdf" : "other",
+  ukuranBytes: a.sizeBytes,
+  uploadedBy: a.uploadedById,
   createdAt: a.createdAt,
 });
 

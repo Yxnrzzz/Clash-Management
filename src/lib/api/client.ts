@@ -35,20 +35,30 @@ async function readError(res: Response): Promise<string> {
   return `Permintaan gagal (${res.status})`;
 }
 
+function authHeaders(init?: RequestInit): HeadersInit {
+  // FormData sets its own multipart boundary in Content-Type; letting the
+  // browser do it (by omitting the header here) is required for uploads.
+  const isFormData = init?.body instanceof FormData;
+  return {
+    ...(init?.body && !isFormData ? { "Content-Type": "application/json" } : {}),
+    ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    ...init?.headers,
+  };
+}
+
 async function send<T>(path: string, init?: RequestInit): Promise<T> {
   // Same-origin: next.config.ts rewrites /api/* to the NestJS server.
-  const res = await fetch(`/api${path}`, {
-    ...init,
-    headers: {
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      ...init?.headers,
-    },
-  });
+  const res = await fetch(`/api${path}`, { ...init, headers: authHeaders(init) });
 
   if (!res.ok) throw new ApiError(res.status, await readError(res));
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+async function sendBlob(path: string, init?: RequestInit): Promise<Blob> {
+  const res = await fetch(`/api${path}`, { ...init, headers: authHeaders(init) });
+  if (!res.ok) throw new ApiError(res.status, await readError(res));
+  return res.blob();
 }
 
 /** Exchanges the refresh cookie for a new access token. Never retried itself. */
@@ -97,6 +107,23 @@ export function apiPost<T>(path: string, body?: unknown): Promise<T> {
 
 export function apiPatch<T>(path: string, body: unknown): Promise<T> {
   return apiFetch<T>(path, { method: "PATCH", body: JSON.stringify(body) });
+}
+
+export function apiUpload<T>(path: string, formData: FormData): Promise<T> {
+  return apiFetch<T>(path, { method: "POST", body: formData });
+}
+
+/** Same 401-retry-once behavior as apiFetch, but for binary responses. */
+export async function apiDownloadBlob(path: string): Promise<Blob> {
+  try {
+    return await sendBlob(path);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      const session = await restoreSession();
+      if (session) return sendBlob(path);
+    }
+    throw error;
+  }
 }
 
 export async function login(email: string, password: string): Promise<ApiSession> {

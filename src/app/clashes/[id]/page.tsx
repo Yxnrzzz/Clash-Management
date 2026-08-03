@@ -1,10 +1,11 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
 import { useMasterDataLookups } from "@/lib/use-master-data";
+import { apiDownloadBlob } from "@/lib/api/client";
 import { canComment, canEditClash, formatBytes, formatDateTime } from "@/lib/lookup";
 import { PriorityBadge, StatusBadge, OverdueBadge } from "@/components/Badge";
 
@@ -18,7 +19,6 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     comments,
     auditLogs,
     attachments,
-    attachmentPreviewUrls,
     project,
     users,
     updateClashField,
@@ -33,13 +33,54 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
   const [tab, setTab] = useState<Tab>("lampiran");
   const [commentText, setCommentText] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
+  const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
+  const previewUrlsRef = useRef<Record<string, string>>({});
 
-  // Comments and audit log are loaded lazily per clash — the Register never
-  // needs them, only this detail page does.
+  // Comments, audit log, and attachments are loaded lazily per clash — the
+  // Register never needs them, only this detail page does.
   useEffect(() => {
     void loadClashDetail(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loadClashDetail is stable; only re-run when the route id changes
   }, [id]);
+
+  // Fetches a blob preview URL for each attachment not already fetched.
+  // Unlike the old session-only object URLs, this re-fetches from the server
+  // on every mount, so previews survive a reload (see HANDOFF.md §5).
+  useEffect(() => {
+    const missing = attachments.filter(
+      (a) => a.clashId === id && !previewUrlsRef.current[a.id]
+    );
+    if (missing.length === 0) return;
+
+    let cancelled = false;
+    Promise.all(
+      missing.map(async (a) => {
+        try {
+          const blob = await apiDownloadBlob(`/clashes/${id}/attachments/${a.id}/download`);
+          return [a.id, URL.createObjectURL(blob)] as const;
+        } catch {
+          return null;
+        }
+      })
+    ).then((entries) => {
+      if (cancelled) return;
+      const next = { ...previewUrlsRef.current };
+      for (const entry of entries) if (entry) next[entry[0]] = entry[1];
+      previewUrlsRef.current = next;
+      setPreviewUrls(next);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [attachments, id]);
+
+  // Revoke every blob URL this page created, once, on unmount.
+  useEffect(() => {
+    return () => {
+      Object.values(previewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, []);
 
   if (isLoading || !user) {
     return <div className="p-8 text-sm text-zinc-500">Memuat…</div>;
@@ -170,7 +211,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                   ) : (
                     <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       {clashAttachments.map((a) => {
-                        const previewUrl = attachmentPreviewUrls[a.id];
+                        const previewUrl = previewUrls[a.id];
                         return (
                           <li
                             key={a.id}
@@ -192,7 +233,6 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                               <p className="truncate text-sm font-medium text-zinc-700">{a.namaFile}</p>
                               <p className="text-xs text-zinc-400">
                                 {formatBytes(a.ukuranBytes)} · diunggah oleh {userById(a.uploadedBy)?.nama}
-                                {!previewUrl && " · pratinjau tidak tersedia setelah reload"}
                               </p>
                             </div>
                             {previewUrl && (

@@ -92,9 +92,20 @@ export interface ApiAuditLog {
   createdAt: string;
 }
 
+export interface ApiAttachment {
+  id: string;
+  clashId: string;
+  fileName: string;
+  fileType: string;
+  sizeBytes: number;
+  uploadedById: string;
+  createdAt: string;
+}
+
 export interface ApiClashDetail extends ApiClash {
   comments: ApiComment[];
   auditLogs: ApiAuditLog[];
+  attachments: ApiAttachment[];
 }
 
 export interface ApiClashListResponse {

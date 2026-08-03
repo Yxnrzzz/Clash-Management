@@ -50,10 +50,6 @@ export interface Attachment {
   ukuranBytes: number;
   uploadedBy: string;
   createdAt: string;
-  /** Object URL for this session only — attachments are not persisted to
-   * localStorage (no backend/object storage exists), so the file itself does
-   * not survive a page reload. See data-context.tsx for the in-memory store. */
-  objectUrl?: string;
 }
 
 export interface Comment {

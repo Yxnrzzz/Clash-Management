@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Prisma, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { AuthUser } from '../auth/auth.types';
 import {
   BulkUpdateClashDto,
@@ -67,7 +68,10 @@ function addDays(date: Date, days: number): Date {
  */
 @Injectable()
 export class ClashesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storage: StorageService,
+  ) {}
 
   private async currentProject() {
     const project = await this.prisma.project.findFirst({ orderBy: { createdAt: 'asc' } });
@@ -286,12 +290,46 @@ export class ClashesService {
     const clash = await this.prisma.clash.findUnique({ where: { id } });
     if (!clash) throw new NotFoundException('Clash tidak ditemukan.');
 
-    const [comments, auditLogs] = await Promise.all([
+    const [comments, auditLogs, attachments] = await Promise.all([
       this.prisma.comment.findMany({ where: { clashId: id }, orderBy: { createdAt: 'asc' } }),
       this.prisma.auditLog.findMany({ where: { clashId: id }, orderBy: { createdAt: 'desc' } }),
+      this.prisma.attachment.findMany({ where: { clashId: id }, orderBy: { createdAt: 'asc' } }),
     ]);
 
-    return { ...clash, comments, auditLogs };
+    return { ...clash, comments, auditLogs, attachments };
+  }
+
+  // --- Attachments ---------------------------------------------------------------
+
+  async addAttachments(clashId: string, files: Express.Multer.File[], user: AuthUser) {
+    const clash = await this.prisma.clash.findUnique({ where: { id: clashId } });
+    if (!clash) throw new NotFoundException('Clash tidak ditemukan.');
+
+    const created = [];
+    for (const file of files) {
+      const { key } = await this.storage.save(file.buffer, clash.id, file.originalname);
+      created.push(
+        await this.prisma.attachment.create({
+          data: {
+            clashId: clash.id,
+            fileName: file.originalname,
+            fileUrl: key,
+            fileType: file.mimetype,
+            sizeBytes: file.size,
+            uploadedById: user.id,
+          },
+        }),
+      );
+    }
+    return created;
+  }
+
+  async getAttachmentForDownload(clashId: string, attachmentId: string) {
+    const attachment = await this.prisma.attachment.findUnique({ where: { id: attachmentId } });
+    if (!attachment || attachment.clashId !== clashId) {
+      throw new NotFoundException('Lampiran tidak ditemukan.');
+    }
+    return { attachment, stream: this.storage.readStream(attachment.fileUrl) };
   }
 
   // --- Create ------------------------------------------------------------------
