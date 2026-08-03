@@ -3,6 +3,7 @@ import { Role } from '@prisma/client';
 import { ClashesService } from './clashes.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AuthUser } from '../auth/auth.types';
 import { DashboardMetricsQueryDto, ListClashesQueryDto } from './dto/clash.dto';
 
@@ -10,6 +11,12 @@ const fakeStorage = {
   save: jest.fn(() => Promise.resolve({ key: 'clash-1/fake-key.png' })),
   readStream: jest.fn(),
 } as unknown as StorageService;
+
+const fakeNotifications = {
+  enqueueAssigned: jest.fn(() => Promise.resolve()),
+  enqueueStatusChange: jest.fn(() => Promise.resolve()),
+  enqueueOverdue: jest.fn(() => Promise.resolve()),
+} as unknown as NotificationsService;
 
 const PROJECT = { id: 'proj-1', code: 'MCA', createdAt: new Date('2026-01-01') };
 
@@ -126,7 +133,7 @@ function makePrisma(clash: ReturnType<typeof baseClash> | null) {
 describe('ClashesService.update — RBAC', () => {
   it('rejects an Engineer editing a clash they neither reported nor are assigned to', async () => {
     const { prisma } = makePrisma(baseClash({ assigneeId: null, reporterId: 'u-coord' }));
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await expect(
       service.update('clash-1', { statusId: 'st-inprogress' }, otherEngineer),
@@ -135,7 +142,7 @@ describe('ClashesService.update — RBAC', () => {
 
   it('allows an Engineer to edit a clash assigned to them', async () => {
     const { prisma, clashDelegate } = makePrisma(baseClash({ assigneeId: 'u-eng' }));
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await service.update('clash-1', { statusId: 'st-inprogress' }, engineer);
     expect(clashDelegate.update).toHaveBeenCalled();
@@ -145,7 +152,7 @@ describe('ClashesService.update — RBAC', () => {
     const { prisma, clashDelegate } = makePrisma(
       baseClash({ assigneeId: null, reporterId: 'u-eng' }),
     );
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await service.update('clash-1', { statusId: 'st-inprogress' }, engineer);
     expect(clashDelegate.update).toHaveBeenCalled();
@@ -155,7 +162,7 @@ describe('ClashesService.update — RBAC', () => {
     const { prisma, clashDelegate } = makePrisma(
       baseClash({ assigneeId: 'u-eng', reporterId: 'u-eng' }),
     );
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await service.update('clash-1', { priorityId: 'pr-high' }, coordinator);
     expect(clashDelegate.update).toHaveBeenCalled();
@@ -165,7 +172,7 @@ describe('ClashesService.update — RBAC', () => {
 describe('ClashesService.update — status transitions', () => {
   it('lets an assigned Engineer move one step forward', async () => {
     const { prisma, clashDelegate } = makePrisma(baseClash({ statusId: 'st-open' }));
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await service.update('clash-1', { statusId: 'st-inprogress' }, engineer);
     expect(clashDelegate.update).toHaveBeenCalled();
@@ -173,7 +180,7 @@ describe('ClashesService.update — status transitions', () => {
 
   it('rejects an Engineer skipping a status two steps forward', async () => {
     const { prisma } = makePrisma(baseClash({ statusId: 'st-open' }));
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await expect(
       service.update('clash-1', { statusId: 'st-resolved' }, engineer),
@@ -182,7 +189,7 @@ describe('ClashesService.update — status transitions', () => {
 
   it('rejects an Engineer closing a clash even one step forward', async () => {
     const { prisma } = makePrisma(baseClash({ statusId: 'st-resolved' }));
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await expect(
       service.update('clash-1', { statusId: 'st-closed' }, engineer),
@@ -191,7 +198,7 @@ describe('ClashesService.update — status transitions', () => {
 
   it('rejects an Engineer reassigning, changing priority, or due date', async () => {
     const { prisma } = makePrisma(baseClash());
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await expect(
       service.update('clash-1', { priorityId: 'pr-high' }, engineer),
@@ -203,7 +210,7 @@ describe('ClashesService.update — status transitions', () => {
 
   it('lets Coordinator move to any other status, including closing it', async () => {
     const { prisma, clashDelegate } = makePrisma(baseClash({ statusId: 'st-open' }));
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await service.update('clash-1', { statusId: 'st-closed' }, coordinator);
     expect(clashDelegate.update).toHaveBeenCalledWith(
@@ -219,7 +226,7 @@ describe('ClashesService.update — closedAt and audit log', () => {
     const { prisma, clashDelegate } = makePrisma(
       baseClash({ statusId: 'st-closed', closedAt: new Date('2026-07-05') }),
     );
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await service.update('clash-1', { statusId: 'st-open' }, coordinator);
     expect(clashDelegate.update).toHaveBeenCalledWith(
@@ -231,7 +238,7 @@ describe('ClashesService.update — closedAt and audit log', () => {
     const { prisma, auditLog } = makePrisma(
       baseClash({ statusId: 'st-open', priorityId: 'pr-low', assigneeId: null }),
     );
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await service.update(
       'clash-1',
@@ -262,7 +269,7 @@ describe('ClashesService.update — closedAt and audit log', () => {
 
   it('writes no audit row and does not update when the patch value equals the current value', async () => {
     const { prisma, clashDelegate, auditLog } = makePrisma(baseClash({ statusId: 'st-open' }));
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     const result = await service.update('clash-1', { statusId: 'st-open' }, coordinator);
 
@@ -279,7 +286,7 @@ describe('ClashesService.bulkUpdate', () => {
     (clashDelegate.findUnique as jest.Mock)
       .mockResolvedValueOnce(baseClash({ id: 'clash-1', statusId: 'st-open' }))
       .mockResolvedValueOnce(null);
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     const result = await service.bulkUpdate(
       { ids: ['clash-1', 'clash-missing'], patch: { statusId: 'st-inprogress' } },
@@ -306,7 +313,7 @@ describe('ClashesService.create', () => {
       ({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'clash-new', ...data }),
     );
 
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
     const created = (await service.create(
       {
         title: 'Judul',
@@ -337,7 +344,7 @@ describe('ClashesService.list', () => {
       project: { findFirst: jest.fn(() => Promise.resolve(PROJECT)) },
       clash: { findMany, count },
     } as unknown as PrismaService;
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     const result = await service.list({
       disc: ['disc-ars'],
@@ -377,7 +384,7 @@ describe('ClashesService.list', () => {
       project: { findFirst: jest.fn(() => Promise.resolve(PROJECT)) },
       clash: { findMany, count },
     } as unknown as PrismaService;
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await service.list({ sort: 'createdAt', dir: 'desc', page: 1, pageSize: 10 } as ListClashesQueryDto);
 
@@ -422,7 +429,7 @@ describe('ClashesService.metrics', () => {
       status: { findMany: jest.fn(() => Promise.resolve(STATUSES)) },
       clash: { findMany: jest.fn(() => Promise.resolve(clashes)) },
     } as unknown as PrismaService;
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     const result = await service.metrics({ to: '2026-07-05' } as DashboardMetricsQueryDto);
 
@@ -447,7 +454,7 @@ describe('ClashesService.findDetail', () => {
     const { prisma, comment, attachment } = makePrisma(baseClash());
     (comment.findMany as jest.Mock).mockResolvedValue([{ id: 'c1' }]);
     (attachment.findMany as jest.Mock).mockResolvedValue([{ id: 'att-1' }]);
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     const detail = await service.findDetail('clash-1');
 
@@ -457,7 +464,7 @@ describe('ClashesService.findDetail', () => {
 
   it('throws NotFoundException for a missing clash', async () => {
     const { prisma } = makePrisma(null);
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await expect(service.findDetail('missing')).rejects.toThrow(NotFoundException);
   });
@@ -466,7 +473,7 @@ describe('ClashesService.findDetail', () => {
 describe('ClashesService.addAttachments', () => {
   it('saves each file to storage and creates a matching Attachment row', async () => {
     const { prisma, attachment } = makePrisma(baseClash());
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
     const files = [
       { originalname: 'photo.png', mimetype: 'image/png', size: 1024, buffer: Buffer.from('x') },
     ] as Express.Multer.File[];
@@ -489,7 +496,7 @@ describe('ClashesService.addAttachments', () => {
 
   it('throws NotFoundException for a missing clash', async () => {
     const { prisma } = makePrisma(null);
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await expect(service.addAttachments('missing', [], engineer)).rejects.toThrow(
       NotFoundException,
@@ -505,7 +512,7 @@ describe('ClashesService.getAttachmentForDownload', () => {
       clashId: 'clash-1',
       fileUrl: 'clash-1/fake-key.png',
     });
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     const result = await service.getAttachmentForDownload('clash-1', 'att-1');
 
@@ -520,7 +527,7 @@ describe('ClashesService.getAttachmentForDownload', () => {
       clashId: 'clash-other',
       fileUrl: 'x',
     });
-    const service = new ClashesService(prisma, fakeStorage);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
     await expect(service.getAttachmentForDownload('clash-1', 'att-1')).rejects.toThrow(
       NotFoundException,

@@ -5,6 +5,7 @@ import type {
   Comment,
   Discipline,
   NewClashInput,
+  NotificationPreference,
   Priority,
   Project,
   Role,
@@ -20,6 +21,7 @@ import type {
   ApiComment,
   ApiDashboardMetrics,
   ApiDiscipline,
+  ApiNotificationPreference,
   ApiPriority,
   ApiProject,
   ApiRole,
@@ -189,6 +191,23 @@ export type ClashFieldPatch = Partial<{
   assigneeId: string | null;
   dueDate: string | null;
 }>;
+
+// --- Notification preference ----------------------------------------------
+
+export const toNotificationPreference = (p: ApiNotificationPreference): NotificationPreference => ({
+  userId: p.userId,
+  emailEnabled: p.emailEnabled,
+  whatsappEnabled: p.whatsappEnabled,
+  whatsappNumber: p.whatsappNumber,
+});
+
+export const notificationPreferencePayload = (
+  input: Partial<Omit<NotificationPreference, "userId">>
+) => ({
+  ...(input.emailEnabled !== undefined ? { emailEnabled: input.emailEnabled } : {}),
+  ...(input.whatsappEnabled !== undefined ? { whatsappEnabled: input.whatsappEnabled } : {}),
+  ...(input.whatsappNumber !== undefined ? { whatsappNumber: input.whatsappNumber } : {}),
+});
 
 // --- Dashboard metrics ---------------------------------------------------
 

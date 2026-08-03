@@ -11,9 +11,9 @@ const e164Schema = z
 
 export default function NotificationSettingsPage() {
   const { user, isLoading } = useRequireAuth();
-  const { notificationPreferences, setNotificationPreference } = useData();
+  const { notificationPreference, updateNotificationPreference } = useData();
 
-  const pref = notificationPreferences.find((p) => p.userId === user?.id) ?? {
+  const pref = notificationPreference ?? {
     userId: user?.id ?? "",
     emailEnabled: true,
     whatsappEnabled: false,
@@ -33,7 +33,7 @@ export default function NotificationSettingsPage() {
     setTimeout(() => setSaved(false), 2000);
   }
 
-  function handleWhatsappToggle(enabled: boolean) {
+  async function handleWhatsappToggle(enabled: boolean) {
     if (enabled) {
       const result = e164Schema.safeParse(whatsappNumber);
       if (!result.success) {
@@ -45,15 +45,24 @@ export default function NotificationSettingsPage() {
       // save may not have fired yet if the user tabs straight from the
       // number field to the toggle, so relying on it alone can enable
       // WhatsApp with no number saved.
-      setNotificationPreference(user!.id, { whatsappEnabled: true, whatsappNumber: result.data });
+      try {
+        await updateNotificationPreference({ whatsappEnabled: true, whatsappNumber: result.data });
+        flashSaved();
+      } catch {
+        // AppShell's syncError banner already surfaces the failure.
+      }
     } else {
       setNumberError(null);
-      setNotificationPreference(user!.id, { whatsappEnabled: false });
+      try {
+        await updateNotificationPreference({ whatsappEnabled: false });
+        flashSaved();
+      } catch {
+        // AppShell's syncError banner already surfaces the failure.
+      }
     }
-    flashSaved();
   }
 
-  function handleNumberBlur() {
+  async function handleNumberBlur() {
     if (!pref.whatsappEnabled) return;
     const result = e164Schema.safeParse(whatsappNumber);
     if (!result.success) {
@@ -61,8 +70,12 @@ export default function NotificationSettingsPage() {
       return;
     }
     setNumberError(null);
-    setNotificationPreference(user!.id, { whatsappNumber });
-    flashSaved();
+    try {
+      await updateNotificationPreference({ whatsappNumber });
+      flashSaved();
+    } catch {
+      // AppShell's syncError banner already surfaces the failure.
+    }
   }
 
   return (
@@ -89,8 +102,12 @@ export default function NotificationSettingsPage() {
               type="checkbox"
               checked={pref.emailEnabled}
               onChange={(e) => {
-                setNotificationPreference(user.id, { emailEnabled: e.target.checked });
-                flashSaved();
+                const emailEnabled = e.target.checked;
+                updateNotificationPreference({ emailEnabled })
+                  .then(flashSaved)
+                  .catch(() => {
+                    // AppShell's syncError banner already surfaces the failure.
+                  });
               }}
               className="peer sr-only"
             />

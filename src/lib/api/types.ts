@@ -113,6 +113,13 @@ export interface ApiClashListResponse {
   total: number;
 }
 
+export interface ApiNotificationPreference {
+  userId: string;
+  emailEnabled: boolean;
+  whatsappEnabled: boolean;
+  whatsappNumber: string;
+}
+
 export interface ApiSlice {
   id: string;
   label: string;

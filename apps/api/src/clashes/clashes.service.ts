@@ -2,11 +2,13 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AuthUser } from '../auth/auth.types';
 import {
   BulkUpdateClashDto,
@@ -68,9 +70,12 @@ function addDays(date: Date, days: number): Date {
  */
 @Injectable()
 export class ClashesService {
+  private readonly logger = new Logger(ClashesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private async currentProject() {
@@ -512,6 +517,7 @@ export class ClashesService {
       statusId: string;
       priorityId: string;
       assigneeId: string | null;
+      reporterId: string;
       dueDate: Date | null;
       closedAt: Date | null;
     },
@@ -579,11 +585,50 @@ export class ClashesService {
 
     if (auditRows.length === 0) return null;
 
-    return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.clash.update({ where: { id: clash.id }, data });
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.clash.update({ where: { id: clash.id }, data });
       await tx.auditLog.createMany({ data: auditRows });
-      return updated;
+      return result;
     });
+
+    this.publishNotifications(clash, auditRows, actorId, data.assigneeId as string | null | undefined);
+
+    return updated;
+  }
+
+  /**
+   * Fire-and-forget: a notification-queue hiccup (e.g. Redis unreachable)
+   * must never fail the clash update itself, so failures are logged, not
+   * thrown. Called after the transaction commits, so it only fires for
+   * changes that actually landed.
+   */
+  private publishNotifications(
+    clash: { id: string; assigneeId: string | null; reporterId: string },
+    auditRows: Prisma.AuditLogCreateManyInput[],
+    actorId: string,
+    newAssigneeId: string | null | undefined,
+  ): void {
+    for (const row of auditRows) {
+      if (row.field === 'assigneeId' && newAssigneeId) {
+        this.notifications
+          .enqueueAssigned(clash.id, newAssigneeId)
+          .catch((error: Error) => this.logger.warn(`Gagal enqueue notifikasi assigned: ${error.message}`));
+      }
+
+      if (row.field === 'statusId') {
+        const currentAssigneeId = newAssigneeId !== undefined ? newAssigneeId : clash.assigneeId;
+        const recipients = [...new Set([currentAssigneeId, clash.reporterId])].filter(
+          (id): id is string => Boolean(id) && id !== actorId,
+        );
+        if (recipients.length > 0) {
+          this.notifications
+            .enqueueStatusChange(clash.id, recipients, String(row.oldValue), String(row.newValue))
+            .catch((error: Error) =>
+              this.logger.warn(`Gagal enqueue notifikasi status_change: ${error.message}`),
+            );
+        }
+      }
+    }
   }
 
   private sameValue(field: PatchableField, oldValue: PatchValue, newValue: PatchValue): boolean {
