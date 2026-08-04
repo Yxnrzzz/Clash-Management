@@ -142,6 +142,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
   function auditText(entry: (typeof auditLogs)[number]) {
     const actor = userById(entry.actorId)?.nama ?? "Sistem";
     if (entry.aksi === "created") return `${actor} membuat clash ini.`;
+    if (entry.aksi === "imported") return `${actor} membuat clash ini lewat impor massal.`;
     return `${actor} mengubah ${fieldLabel(entry.field ?? "").toLowerCase()} dari "${entry.nilaiLama}" ke "${entry.nilaiBaru}".`;
   }
 

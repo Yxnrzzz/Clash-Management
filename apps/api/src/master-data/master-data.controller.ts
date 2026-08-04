@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { Roles } from '../common/decorators/roles.decorator';
 import {
+  CopyTemplateDto,
   CreateDisciplineDto,
   CreatePriorityDto,
   CreateZoneDto,
@@ -96,5 +97,11 @@ export class MasterDataController {
   @Patch('statuses/:id')
   updateStatus(@Param('id') id: string, @Body() dto: UpdateStatusDto) {
     return this.masterData.updateStatus(id, dto);
+  }
+
+  @Roles(Role.ADMIN)
+  @Post('templates/copy')
+  copyTemplate(@Body() dto: CopyTemplateDto) {
+    return this.masterData.copyTemplate(dto);
   }
 }

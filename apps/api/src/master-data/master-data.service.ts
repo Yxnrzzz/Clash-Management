@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  CopyTemplateDto,
   CreateDisciplineDto,
   CreatePriorityDto,
   CreateZoneDto,
@@ -155,6 +156,75 @@ export class MasterDataService {
         ...(dto.isClosedState !== undefined ? { isClosedState: dto.isClosedState } : {}),
       },
     });
+  }
+
+  // --- Templates -------------------------------------------------------------
+
+  /**
+   * Copies active disciplines/zones from one project to another. Idempotent
+   * by design (safe to run twice): rows that already exist in the target —
+   * matched by code for disciplines, by name+level for zones — are skipped
+   * rather than duplicated. Priorities/statuses are project-agnostic already
+   * (no projectId column) so they never need copying.
+   */
+  async copyTemplate(dto: CopyTemplateDto) {
+    if (dto.fromProjectId === dto.toProjectId) {
+      throw new BadRequestException('Proyek sumber dan tujuan harus berbeda.');
+    }
+
+    const [fromProject, toProject] = await Promise.all([
+      this.prisma.project.findUnique({ where: { id: dto.fromProjectId } }),
+      this.prisma.project.findUnique({ where: { id: dto.toProjectId } }),
+    ]);
+    if (!fromProject) throw new NotFoundException('Proyek sumber tidak ditemukan.');
+    if (!toProject) throw new NotFoundException('Proyek tujuan tidak ditemukan.');
+
+    const copied = { disciplines: 0, zones: 0 };
+    const skipped = { disciplines: 0, zones: 0 };
+
+    if (dto.include.includes('disciplines')) {
+      const [sourceRows, targetRows] = await Promise.all([
+        this.prisma.discipline.findMany({ where: { projectId: fromProject.id, isActive: true } }),
+        this.prisma.discipline.findMany({ where: { projectId: toProject.id } }),
+      ]);
+      const existingCodes = new Set(targetRows.map((d) => d.code.toUpperCase()));
+
+      for (const row of sourceRows) {
+        if (existingCodes.has(row.code.toUpperCase())) {
+          skipped.disciplines++;
+          continue;
+        }
+        await this.prisma.discipline.create({
+          data: { projectId: toProject.id, code: row.code, name: row.name },
+        });
+        existingCodes.add(row.code.toUpperCase());
+        copied.disciplines++;
+      }
+    }
+
+    if (dto.include.includes('zones')) {
+      const [sourceRows, targetRows] = await Promise.all([
+        this.prisma.zone.findMany({ where: { projectId: fromProject.id, isActive: true } }),
+        this.prisma.zone.findMany({ where: { projectId: toProject.id } }),
+      ]);
+      const zoneKey = (name: string, level: string) => `${level.toLowerCase()}::${name.toLowerCase()}`;
+      const existingKeys = new Set(targetRows.map((z) => zoneKey(z.name, z.level)));
+
+      for (const row of sourceRows) {
+        const key = zoneKey(row.name, row.level);
+        if (existingKeys.has(key)) {
+          skipped.zones++;
+          continue;
+        }
+        await this.prisma.zone.create({
+          data: { projectId: toProject.id, name: row.name, level: row.level },
+        });
+        existingKeys.add(key);
+        copied.zones++;
+      }
+    }
+
+    return { copied, skipped };
   }
 
   private async assertExists(

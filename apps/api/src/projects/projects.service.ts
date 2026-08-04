@@ -16,6 +16,13 @@ export class ProjectsService {
     return { id: project.id, name: project.name, code: project.code };
   }
 
+  /** Admin-only (see ProjectsController) — used by the master-data "copy
+   * template" dialog to pick a source/target project. */
+  async listAll() {
+    const projects = await this.prisma.project.findMany({ orderBy: { name: 'asc' } });
+    return projects.map((p) => ({ id: p.id, name: p.name, code: p.code }));
+  }
+
   async update(id: string, dto: UpdateProjectDto) {
     const existing = await this.prisma.project.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Proyek tidak ditemukan.');

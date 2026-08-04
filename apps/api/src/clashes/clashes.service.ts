@@ -63,6 +63,11 @@ function addDays(date: Date, days: number): Date {
   return d;
 }
 
+/** Thrown by createClashRecord() when the row's externalId already exists in
+ * the project — distinct from a plain retryable uniqueCode race so callers
+ * (ImportProcessor) can treat it as a dedup skip rather than a hard failure. */
+export class DuplicateExternalIdError extends Error {}
+
 /**
  * Mirrors the RBAC rules the frontend already enforces for UX
  * (src/lib/lookup.ts canEditClash, src/lib/use-master-data.ts
@@ -358,43 +363,87 @@ export class ClashesService {
     if (!priority) throw new BadRequestException('Prioritas tidak valid.');
     if (!openStatus) throw new BadRequestException('Belum ada status yang dikonfigurasi.');
 
-    const nowIso = new Date();
+    return this.createClashRecord({
+      project,
+      discipline,
+      zoneId: zone.id,
+      priorityId: priority.id,
+      statusId: openStatus.id,
+      reporterId: user.id,
+      title: dto.title,
+      description: dto.description,
+      dueDate: dto.dueDate ? new Date(dto.dueDate) : null,
+    });
+  }
 
-    // The unique code embeds a per-discipline sequence number. Two concurrent
-    // creates for the same discipline can race for the same number, so retry
-    // once on the unique-constraint violation with a freshly counted value.
+  /**
+   * Shared row-creation path for both the single-clash create() above and
+   * ImportProcessor's per-row commit. Callers are responsible for resolving
+   * and validating discipline/zone/priority/status first — this method only
+   * owns generating the unique code and writing the Clash + AuditLog pair.
+   *
+   * The unique code embeds a per-discipline sequence number. Two concurrent
+   * creates for the same discipline can race for the same number, so retry
+   * once on a uniqueCode collision with a freshly counted value. A collision
+   * on (projectId, externalId) is a different situation — it means this
+   * exact import row already exists — so it's surfaced as
+   * DuplicateExternalIdError instead of retried.
+   */
+  async createClashRecord(input: {
+    project: { id: string; code: string };
+    discipline: { id: string; code: string };
+    zoneId: string;
+    priorityId: string;
+    statusId: string;
+    reporterId: string;
+    title: string;
+    description: string;
+    dueDate: Date | null;
+    externalId?: string | null;
+    auditAction?: string;
+  }) {
+    const nowIso = new Date();
+    const auditAction = input.auditAction ?? 'created';
+
     for (let attempt = 0; attempt < 2; attempt++) {
-      const count = await this.prisma.clash.count({ where: { disciplineId: discipline.id } });
-      const uniqueCode = `${project.code}-${discipline.code}-${String(count + 1).padStart(4, '0')}`;
+      const count = await this.prisma.clash.count({ where: { disciplineId: input.discipline.id } });
+      const uniqueCode = `${input.project.code}-${input.discipline.code}-${String(count + 1).padStart(4, '0')}`;
 
       try {
         return await this.prisma.$transaction(async (tx) => {
           const clash = await tx.clash.create({
             data: {
               uniqueCode,
-              projectId: project.id,
-              title: dto.title.trim(),
-              description: dto.description.trim(),
-              disciplineId: discipline.id,
-              zoneId: zone.id,
-              statusId: openStatus.id,
-              priorityId: priority.id,
-              reporterId: user.id,
-              dueDate: dto.dueDate ? new Date(dto.dueDate) : null,
+              projectId: input.project.id,
+              title: input.title.trim(),
+              description: input.description.trim(),
+              disciplineId: input.discipline.id,
+              zoneId: input.zoneId,
+              statusId: input.statusId,
+              priorityId: input.priorityId,
+              reporterId: input.reporterId,
+              dueDate: input.dueDate,
+              externalId: input.externalId ?? null,
             },
           });
 
           await tx.auditLog.create({
-            data: { clashId: clash.id, actorId: user.id, action: 'created', createdAt: nowIso },
+            data: { clashId: clash.id, actorId: input.reporterId, action: auditAction, createdAt: nowIso },
           });
 
           return clash;
         });
       } catch (error) {
-        const isUniqueClash =
-          error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
-        if (!isUniqueClash || attempt === 1) throw error;
-        // fall through and retry with a recomputed count
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          const target = Array.isArray(error.meta?.target) ? (error.meta.target as string[]) : [];
+          if (target.includes('externalId')) {
+            throw new DuplicateExternalIdError(
+              `External id "${input.externalId}" sudah dipakai di proyek ini.`,
+            );
+          }
+          if (attempt === 0) continue; // uniqueCode race — retry with a recomputed count
+        }
+        throw error;
       }
     }
     throw new BadRequestException('Gagal membuat kode unik clash, coba lagi.');

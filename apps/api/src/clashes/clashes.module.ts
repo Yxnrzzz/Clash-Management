@@ -9,5 +9,6 @@ import { ClashesService } from './clashes.service';
   imports: [PrismaModule, StorageModule, NotificationsModule],
   controllers: [ClashesController],
   providers: [ClashesService],
+  exports: [ClashesService],
 })
 export class ClashesModule {}

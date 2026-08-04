@@ -25,6 +25,13 @@ enum NotificationType {
   OVERDUE
 }
 
+enum ImportJobStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+}
+
 model User {
   id           String   @id @default(uuid())
   name         String
@@ -43,6 +50,7 @@ model User {
   auditLogs               AuditLog[]
   notifications           Notification[]
   notificationPreference  NotificationPreference?
+  importJobs              ImportJob[]
 }
 
 model Project {
@@ -56,6 +64,7 @@ model Project {
   disciplines Discipline[]
   zones       Zone[]
   clashes     Clash[]
+  importJobs  ImportJob[]
 }
 
 model ProjectMember {
@@ -128,6 +137,11 @@ model Clash {
   dueDate      DateTime?
   createdAt    DateTime  @default(now())
   closedAt     DateTime?
+  // Set only for clashes created via /import/commit. Nullable + unique per
+  // project so most rows (created through the normal UI) can leave it null
+  // without colliding, while an imported row with a given external id can
+  // never be created twice in the same project (see ImportProcessor).
+  externalId   String?
 
   project    Project    @relation(fields: [projectId], references: [id])
   discipline Discipline @relation(fields: [disciplineId], references: [id])
@@ -149,6 +163,7 @@ model Clash {
   @@index([projectId, statusId])
   @@index([projectId, assigneeId])
   @@index([projectId, dueDate])
+  @@unique([projectId, externalId])
 }
 
 model Attachment {
@@ -215,4 +230,33 @@ model NotificationPreference {
   whatsappNumber  String  @default("")
 
   user User @relation(fields: [userId], references: [id])
+}
+
+// One row per /import/commit call. Rows/progress are updated by
+// ImportProcessor as it works through the file so the frontend wizard can
+// poll GET /import/jobs/:id for live progress instead of blocking on one
+// long-lived HTTP request.
+model ImportJob {
+  id            String          @id @default(uuid())
+  projectId     String
+  createdById   String
+  fileName      String
+  storageKey    String
+  format        String
+  mapping       Json
+  autoCreate    Boolean         @default(false)
+  status        ImportJobStatus @default(QUEUED)
+  totalRows     Int             @default(0)
+  processedRows Int             @default(0)
+  succeededRows Int             @default(0)
+  failedRows    Int             @default(0)
+  skippedRows   Int             @default(0)
+  errors        Json            @default("[]")
+  createdAt     DateTime        @default(now())
+  finishedAt    DateTime?
+
+  project   Project @relation(fields: [projectId], references: [id])
+  createdBy User    @relation(fields: [createdById], references: [id])
+
+  @@index([projectId, createdAt])
 }

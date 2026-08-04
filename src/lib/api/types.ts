@@ -143,3 +143,53 @@ export interface ApiDashboardMetrics {
   byPriority: ApiSlice[];
   byZone: ApiSlice[];
 }
+
+export type ApiImportFormat = "csv" | "xml";
+
+/** Values are source column headers picked in the wizard, not master-data ids. */
+export interface ApiImportMapping {
+  title: string;
+  disciplineCode: string;
+  zoneName: string;
+  priorityName: string;
+  description: string;
+  dueDate?: string;
+  externalId?: string;
+}
+
+export interface ApiImportPreview {
+  token: string;
+  fileName: string;
+  format: ApiImportFormat;
+  columns: string[];
+  sampleRows: string[][];
+  totalRows: number;
+  suggestedMapping: Partial<ApiImportMapping>;
+}
+
+export type ApiImportJobStatus = "QUEUED" | "RUNNING" | "DONE" | "FAILED";
+
+export interface ApiImportRowError {
+  rowNumber: number;
+  reason: string;
+}
+
+export interface ApiImportJob {
+  id: string;
+  fileName: string;
+  format: ApiImportFormat;
+  status: ApiImportJobStatus;
+  totalRows: number;
+  processedRows: number;
+  succeededRows: number;
+  failedRows: number;
+  skippedRows: number;
+  errors: ApiImportRowError[];
+  createdAt: string;
+  finishedAt: string | null;
+}
+
+export interface ApiCopyTemplateResult {
+  copied: { disciplines: number; zones: number };
+  skipped: { disciplines: number; zones: number };
+}

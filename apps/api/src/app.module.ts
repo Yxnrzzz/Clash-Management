@@ -11,6 +11,7 @@ import { ProjectsModule } from './projects/projects.module';
 import { MasterDataModule } from './master-data/master-data.module';
 import { ClashesModule } from './clashes/clashes.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { ImportModule } from './import/import.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 
@@ -36,6 +37,7 @@ import { RolesGuard } from './common/guards/roles.guard';
     MasterDataModule,
     ClashesModule,
     NotificationsModule,
+    ImportModule,
   ],
   providers: [
     // Order matters: JwtAuthGuard must populate request.user before RolesGuard
