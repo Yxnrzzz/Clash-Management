@@ -333,12 +333,36 @@ export class ClashesService {
     return created;
   }
 
-  async getAttachmentForDownload(clashId: string, attachmentId: string) {
+  /**
+   * `ProjectMemberGuard` exists but is never wired to this route (or any
+   * route — it's dead code today, see AllExceptionsFilter's neighbor
+   * common/guards/project-member.guard.ts): its design expects a
+   * `:projectId` route param, which resource-nested routes like this one
+   * don't have (`:clashId`/`:attachmentId` only). Without this check, any
+   * authenticated user of any role could download any attachment on any
+   * clash, regardless of project membership. Checked here directly instead.
+   */
+  async getAttachmentForDownload(clashId: string, attachmentId: string, user: AuthUser) {
     const attachment = await this.prisma.attachment.findUnique({ where: { id: attachmentId } });
     if (!attachment || attachment.clashId !== clashId) {
       throw new NotFoundException('Lampiran tidak ditemukan.');
     }
+
+    await this.assertProjectMember(user);
+
     return { attachment, stream: this.storage.readStream(attachment.fileUrl) };
+  }
+
+  private async assertProjectMember(user: AuthUser): Promise<void> {
+    if (user.role === Role.ADMIN) return;
+
+    const project = await this.currentProject();
+    const membership = await this.prisma.projectMember.findUnique({
+      where: { projectId_userId: { projectId: project.id, userId: user.id } },
+    });
+    if (!membership) {
+      throw new ForbiddenException('Anda bukan anggota proyek ini.');
+    }
   }
 
   // --- Create ------------------------------------------------------------------

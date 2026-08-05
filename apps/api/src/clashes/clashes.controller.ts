@@ -112,11 +112,13 @@ export class ClashesController {
   async downloadAttachment(
     @Param('clashId') clashId: string,
     @Param('attachmentId') attachmentId: string,
+    @CurrentUser() user: AuthUser,
     @Res({ passthrough: true }) res: Response,
   ) {
     const { attachment, stream } = await this.clashes.getAttachmentForDownload(
       clashId,
       attachmentId,
+      user,
     );
     res.set({
       'Content-Type': attachment.fileType,

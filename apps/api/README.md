@@ -75,13 +75,16 @@ JWT_REFRESH_TTL="7d"
 - `POST /api/auth/login` mengembalikan **access token** (JWT, 15 menit) di body, dan menaruh **refresh token** (7 hari) di cookie `httpOnly` bernama `clashhub_refresh` dengan path `/api/auth`.
 - Access token dikirim di header `Authorization: Bearer <token>`. Frontend menyimpannya di memori (bukan `localStorage`) supaya tidak terbaca XSS.
 - `POST /api/auth/refresh` menukar cookie refresh dengan access token baru. User dibaca ulang dari database setiap kali, sehingga akun yang dinonaktifkan di tengah sesi tidak bisa memperpanjang sesinya.
-- Seluruh route wajib token kecuali yang ditandai `@Public()`: `/api/health`, `/api/auth/login`, `/api/auth/refresh`, `/api/auth/logout`.
+- Seluruh route wajib token kecuali yang ditandai `@Public()`: `/api/health`, `/api/health/ready`, `/api/auth/login`, `/api/auth/refresh`, `/api/auth/logout`.
+- `/api/health` = liveness (cuma cek DB). `/api/health/ready` = readiness (cek DB **dan** Redis — 503 kalau salah satu tidak terjangkau; dipakai orkestrator untuk menahan trafik sampai semua dependensi siap, bukan cuma proses hidup). Sprint 11.
+- `/auth/login` dibatasi 5 percobaan/menit per IP (`@Throttle`); rute lain dibatasi 600/menit per IP secara global. Sprint 11.
 
 ## Daftar endpoint
 
 | Method | Endpoint | Peran yang diizinkan |
 |---|---|---|
 | GET | `/api/health` | publik |
+| GET | `/api/health/ready` | publik |
 | POST | `/api/auth/login` | publik |
 | POST | `/api/auth/refresh` | publik (butuh cookie refresh) |
 | POST | `/api/auth/logout` | publik |

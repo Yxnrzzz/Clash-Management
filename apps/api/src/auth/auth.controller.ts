@@ -1,4 +1,7 @@
 import { Body, Controller, Get, HttpCode, Post, Req, Res } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Throttle } from '@nestjs/throttler';
+import ms from 'ms';
 import type { Request, Response } from 'express';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -8,12 +11,17 @@ import { AuthUser } from './auth.types';
 import { LoginDto } from './dto/login.dto';
 
 const REFRESH_COOKIE = 'clashhub_refresh';
-const REFRESH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    private readonly config: ConfigService,
+  ) {}
 
+  // Stricter than the global default: brute-forcing passwords should be slow,
+  // legitimate retries after a typo should not be blocked.
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Public()
   @Post('login')
   @HttpCode(200)
@@ -34,10 +42,16 @@ export class AuthController {
     return { accessToken: tokens.accessToken, user: toUserView(user) };
   }
 
+  // @Public() rather than requiring a valid access token: the caller's
+  // access token may already be expired by the time they log out, and
+  // logout should still succeed. The refresh cookie itself (if any) is what
+  // tells us whose session to invalidate — see AuthService.invalidateSession.
   @Public()
   @Post('logout')
   @HttpCode(204)
-  logout(@Res({ passthrough: true }) res: Response) {
+  async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const cookie = (req.cookies as Record<string, string> | undefined)?.[REFRESH_COOKIE];
+    await this.auth.invalidateSession(cookie);
     res.clearCookie(REFRESH_COOKIE, { path: '/api/auth' });
   }
 
@@ -53,7 +67,10 @@ export class AuthController {
       secure: process.env.NODE_ENV === 'production',
       // Scoped to the auth routes so it never rides along on ordinary API calls.
       path: '/api/auth',
-      maxAge: REFRESH_MAX_AGE_MS,
+      // Derived from the same env var the token itself is signed with
+      // (JWT_REFRESH_TTL) so the cookie can never outlive — or expire
+      // before — the token it carries.
+      maxAge: ms((this.config.get<string>('JWT_REFRESH_TTL') ?? '7d') as ms.StringValue),
     });
   }
 }

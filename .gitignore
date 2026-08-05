@@ -38,6 +38,9 @@ yarn-error.log*
 # uploaded attachments (local disk storage)
 /apps/api/uploads/
 
+# local pg_dump output from scripts/backup-db.sh
+/apps/api/backups/
+
 # vercel
 .vercel
 

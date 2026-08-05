@@ -13,6 +13,7 @@
 services:
   postgres:
     image: postgres:16
+    container_name: clashhub-postgres-prod
     restart: unless-stopped
     environment:
       POSTGRES_USER: clashuser
@@ -68,6 +69,32 @@ services:
       PORT: 3000
     ports:
       - "3000:3000"
+
+  # Opt-in scheduled backups: uncomment to run scripts/backup-db.sh daily
+  # inside the stack instead of (or in addition to) an external cron job —
+  # see "Backup database" in HANDOFF.md §12 for the manual/host-cron
+  # alternative and the retention policy this script applies.
+  # backup:
+  #   image: postgres:16
+  #   container_name: clashhub-backup
+  #   restart: unless-stopped
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   environment:
+  #     PGHOST: postgres
+  #     PGUSER: clashuser
+  #     PGPASSWORD: clashpass
+  #     PGDATABASE: clashhub_db
+  #     RETENTION_DAYS: 7
+  #   volumes:
+  #     - ./backups:/backups
+  #   entrypoint: >
+  #     sh -c "while true; do
+  #       FILE=/backups/clashhub_$$(date +%Y%m%d_%H%M%S).dump;
+  #       pg_dump -F c -f \"$$FILE\" && find /backups -name '*.dump' -mtime +$$RETENTION_DAYS -delete;
+  #       sleep 86400;
+  #     done"
 
 volumes:
   clashhub-postgres-data:

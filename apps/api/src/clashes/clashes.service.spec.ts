@@ -102,6 +102,12 @@ function makePrisma(clash: ReturnType<typeof baseClash> | null) {
   const project = {
     findFirst: jest.fn(() => Promise.resolve(PROJECT)),
   };
+  // Defaults to "yes, a member" so every existing test (which doesn't care
+  // about this check) keeps passing; getAttachmentForDownload tests override
+  // this per-case to exercise the member/non-member/admin paths.
+  const projectMember = {
+    findUnique: jest.fn(() => Promise.resolve({ projectId: PROJECT.id, userId: 'u-eng' })),
+  };
   const comment = {
     findMany: jest.fn(() => Promise.resolve([])),
   };
@@ -115,6 +121,7 @@ function makePrisma(clash: ReturnType<typeof baseClash> | null) {
 
   const prisma = {
     project,
+    projectMember,
     status,
     priority,
     user,
@@ -127,7 +134,7 @@ function makePrisma(clash: ReturnType<typeof baseClash> | null) {
     ),
   } as unknown as PrismaService;
 
-  return { prisma, clashDelegate, auditLog, comment, attachment };
+  return { prisma, clashDelegate, auditLog, comment, attachment, projectMember };
 }
 
 describe('ClashesService.update — RBAC', () => {
@@ -505,7 +512,7 @@ describe('ClashesService.addAttachments', () => {
 });
 
 describe('ClashesService.getAttachmentForDownload', () => {
-  it('returns the stream for an attachment that belongs to the clash', async () => {
+  it('returns the stream for an attachment that belongs to the clash, for a project member', async () => {
     const { prisma, attachment } = makePrisma(baseClash());
     (attachment.findUnique as jest.Mock).mockResolvedValue({
       id: 'att-1',
@@ -514,7 +521,7 @@ describe('ClashesService.getAttachmentForDownload', () => {
     });
     const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
-    const result = await service.getAttachmentForDownload('clash-1', 'att-1');
+    const result = await service.getAttachmentForDownload('clash-1', 'att-1', engineer);
 
     expect(result.attachment.id).toBe('att-1');
     expect(fakeStorage.readStream).toHaveBeenCalledWith('clash-1/fake-key.png');
@@ -529,8 +536,40 @@ describe('ClashesService.getAttachmentForDownload', () => {
     });
     const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
 
-    await expect(service.getAttachmentForDownload('clash-1', 'att-1')).rejects.toThrow(
+    await expect(service.getAttachmentForDownload('clash-1', 'att-1', engineer)).rejects.toThrow(
       NotFoundException,
     );
+  });
+
+  it('throws ForbiddenException for a user who is not a member of the project', async () => {
+    const { prisma, attachment, projectMember } = makePrisma(baseClash());
+    (attachment.findUnique as jest.Mock).mockResolvedValue({
+      id: 'att-1',
+      clashId: 'clash-1',
+      fileUrl: 'clash-1/fake-key.png',
+    });
+    (projectMember.findUnique as jest.Mock).mockResolvedValue(null);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(service.getAttachmentForDownload('clash-1', 'att-1', engineer)).rejects.toThrow(
+      ForbiddenException,
+    );
+  });
+
+  it('lets an Admin through without checking membership', async () => {
+    const { prisma, attachment, projectMember } = makePrisma(baseClash());
+    (attachment.findUnique as jest.Mock).mockResolvedValue({
+      id: 'att-1',
+      clashId: 'clash-1',
+      fileUrl: 'clash-1/fake-key.png',
+    });
+    (projectMember.findUnique as jest.Mock).mockResolvedValue(null);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+    const admin: AuthUser = { id: 'u-admin', email: 'admin@clashhub.dev', role: Role.ADMIN };
+
+    const result = await service.getAttachmentForDownload('clash-1', 'att-1', admin);
+
+    expect(result.attachment.id).toBe('att-1');
+    expect(projectMember.findUnique).not.toHaveBeenCalled();
   });
 });
