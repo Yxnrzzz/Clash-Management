@@ -15,6 +15,10 @@ const eslintConfig = defineConfig([
     // Separate NestJS backend package with its own lint/tsconfig — not part
     // of this Next.js app's source.
     "apps/**",
+    // Claude Code worktrees/scratch dirs can contain their own build output
+    // (.next, node_modules) that would otherwise get linted as if it were
+    // this app's source, producing thousands of false-positive errors.
+    ".claude/**",
   ]),
 ]);
 

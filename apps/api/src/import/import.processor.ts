@@ -141,7 +141,7 @@ export class ImportProcessor extends WorkerHost {
         data: {
           status: ImportJobStatus.FAILED,
           finishedAt: new Date(),
-          errors: [{ rowNumber: 0, reason: (error as Error).message }] as unknown as Prisma.InputJsonValue,
+          errors: [{ rowNumber: 0, reason: (error as Error).message }] as Prisma.InputJsonValue,
         },
       });
     }

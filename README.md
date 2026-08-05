@@ -9,7 +9,7 @@ Repo ini berisi dua paket:
 | Frontend Next.js | root (`src/`) | 3000 |
 | Backend NestJS | [`apps/api/`](./apps/api/README.md) | 3001 (prefix `/api`) |
 
-**Sprint 0-9 dari [ClashHub_Sprint_Plan.md](./ClashHub_Sprint_Plan.md) sudah selesai, backend dan frontend, dan tersambung penuh** — Login/RBAC, Input Clash + lampiran, Clash Register (filter/sort/search/pagination/bulk update/export), Halaman Rincian (triase, komentar, audit trail), Clash Saya, Dashboard KPI dengan drill-down, notifikasi email + WhatsApp async, Admin panel (User/Proyek/Master Data + template antar proyek), Pengaturan Notifikasi, dan Import CSV/XML massal (async, dedup, auto-create master data). Sprint 10 (fitur AI, opsional) dan Sprint 11 (hardening/deploy) belum dikerjakan. Detail lengkap & catatan teknis ada di [HANDOFF.md](./HANDOFF.md) — dokumen itu adalah sumber kebenaran untuk status proyek, bukan file ini.
+**Sprint 0-9 dari [ClashHub_Sprint_Plan.md](./ClashHub_Sprint_Plan.md) sudah selesai, backend dan frontend, dan tersambung penuh** — Login/RBAC, Input Clash + lampiran, Clash Register (filter/sort/search/pagination/bulk update/export), Halaman Rincian (triase, komentar, audit trail), Clash Saya, Dashboard KPI dengan drill-down, notifikasi email + WhatsApp async, Admin panel (User/Proyek/Master Data + template antar proyek), Pengaturan Notifikasi, dan Import CSV/XML massal (async, dedup, auto-create master data). **CI (GitHub Actions) dan Dockerfile produksi (web + api) juga sudah ada**, menutup utang Sprint 0. Sprint 10 (fitur AI, opsional) dan sisa Sprint 11 (uji beban, hardening keamanan, deploy) belum dikerjakan. Detail lengkap & catatan teknis ada di [HANDOFF.md](./HANDOFF.md) — dokumen itu adalah sumber kebenaran untuk status proyek, bukan file ini.
 
 **Tidak ada lagi apa pun yang client-only.** Seluruh data (project, users, master data, clash, komentar, audit log, lampiran, preferensi notifikasi, job impor) tersimpan dan ditegakkan RBAC-nya di NestJS + PostgreSQL; `localStorage` sudah pensiun total.
 
@@ -44,6 +44,18 @@ npm run dev
 ```
 
 Buka [http://localhost:3000](http://localhost:3000). Frontend mem-proxy `/api/*` ke backend lewat `rewrites` di `next.config.ts`, jadi tidak ada konfigurasi CORS yang perlu diurus. **Tanpa backend hidup, login akan gagal dan seluruh master data kosong.**
+
+### Menjalankan dengan Docker (produksi)
+
+Ada Dockerfile produksi terpisah untuk masing-masing paket (`Dockerfile` di root untuk web, `apps/api/Dockerfile` untuk api — keduanya multi-stage, image runner non-root). `docker-compose.prod.yml` di root menyatukan keduanya dengan Postgres + Redis:
+
+```bash
+cp apps/api/.env.example apps/api/.env   # lalu isi JWT_*_SECRET dsb dengan nilai produksi, bukan placeholder dev
+docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml exec api npx prisma migrate deploy
+```
+
+Ini **terpisah** dari `apps/api/docker-compose.yml` yang dipakai sehari-hari (dependensi dev saja — `postgres`/`redis`/`mailhog`, aplikasi tetap dijalankan via `npm run dev`); `docker-compose.prod.yml` menjalankan aplikasinya juga sebagai container.
 
 ## Akun demo
 
@@ -92,7 +104,7 @@ RBAC ini ditegakkan di **dua** lapis: guard route di client (untuk UX) dan `Role
 - **Clash, komentar, audit log, lampiran** tersimpan penuh di database (lampiran di disk lokal via `StorageService`, S3/R2-ready lewat seam yang sama). Tidak ada lagi batasan "hilang setelah reload".
 - **Notifikasi** email (via MailHog di dev) dan WhatsApp (mock provider, bukan Business API asli) berjalan async lewat BullMQ + Redis.
 - **Import massal** CSV dan XML (Navisworks/Solibri) diproses sebagai job async di server dengan dedup by `external_id` dan opsi auto-create master data (Admin).
-- **Belum ada**: fitur AI (Sprint 10, opsional), dan hardening produksi — Dockerfile, CI/CD, rate limiting, `helmet`, refresh-token rotation, load test terhadap target NFR 10.000 clash (Sprint 11).
+- **Belum ada**: fitur AI (Sprint 10, opsional), dan sisa hardening produksi — rate limiting, `helmet`, refresh-token rotation, global exception filter, load test terhadap target NFR 10.000 clash (Sprint 11). Dockerfile & CI sudah ada (lihat di atas).
 
 ## Reset data demo
 
@@ -106,4 +118,4 @@ Clash/komentar/audit log **tidak** ikut di-reset oleh perintah di atas (disengaj
 
 ## Lanjutan
 
-Sisa dari rencana asli: **Dockerfile + CI** (belum ada sama sekali — deliverable Sprint 0 yang tercatat belum terpenuhi, murah untuk dikerjakan lebih dulu), lalu **Sprint 11** (uji beban terhadap target NFR 10.000 clash, hardening keamanan — rate limiting/`helmet`/refresh-token rotation/global exception filter, observability, deploy), dan opsional **Sprint 10** (fitur AI: auto-kategorisasi + deteksi duplikat, wajib disertai eval harness berlabel). Detail rencana di [ClashHub_Sprint_Plan.md](./ClashHub_Sprint_Plan.md); catatan teknis, gotcha, dan status sesi-per-sesi di [HANDOFF.md](./HANDOFF.md).
+**Sprint 11** (uji beban terhadap target NFR 10.000 clash, hardening keamanan — rate limiting/`helmet`/refresh-token rotation/global exception filter, observability, deploy ke lingkungan nyata), dan opsional **Sprint 10** (fitur AI: auto-kategorisasi + deteksi duplikat, wajib disertai eval harness berlabel). Detail rencana di [ClashHub_Sprint_Plan.md](./ClashHub_Sprint_Plan.md); catatan teknis, gotcha, dan status sesi-per-sesi di [HANDOFF.md](./HANDOFF.md).

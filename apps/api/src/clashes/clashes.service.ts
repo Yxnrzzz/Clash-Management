@@ -12,7 +12,6 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AuthUser } from '../auth/auth.types';
 import {
   BulkUpdateClashDto,
-  BulkUpdatePatchDto,
   CreateClashDto,
   CreateCommentDto,
   DashboardMetricsQueryDto,

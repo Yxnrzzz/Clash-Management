@@ -1,0 +1,75 @@
+# Production-shaped compose file: builds and runs both app images alongside
+# their dependencies. Run from the repo root: `docker compose -f docker-compose.prod.yml up -d --build`.
+#
+# This is NOT a replacement for apps/api/docker-compose.yml — that file is
+# the day-to-day dev dependency stack (postgres/redis/mailhog only, apps run
+# via `npm run dev` / `npm --prefix apps/api run start:dev`) and stays as-is.
+#
+# Before first run: copy apps/api/.env.example to apps/api/.env and fill in
+# real secrets (JWT_*_SECRET at minimum) — do not use the dev placeholders
+# in production. Migrations are NOT run automatically by the api image; run
+# `docker compose -f docker-compose.prod.yml exec api npx prisma migrate deploy`
+# once the stack is up.
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: clashuser
+      POSTGRES_PASSWORD: clashpass
+      POSTGRES_DB: clashhub_db
+    volumes:
+      - clashhub-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clashuser -d clashhub_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - clashhub-redis-data:/data
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    env_file:
+      - ./apps/api/.env
+    environment:
+      DATABASE_URL: postgresql://clashuser:clashpass@postgres:5432/clashhub_db?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      PORT: 3001
+    ports:
+      - "3001:3001"
+    volumes:
+      - clashhub-uploads:/app/uploads
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        API_ORIGIN: http://api:3001
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      API_ORIGIN: http://api:3001
+      PORT: 3000
+    ports:
+      - "3000:3000"
+
+volumes:
+  clashhub-postgres-data:
+  clashhub-redis-data:
+  clashhub-uploads:

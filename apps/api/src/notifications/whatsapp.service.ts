@@ -16,7 +16,8 @@ export interface WhatsAppProvider {
 export class MockWhatsAppProvider implements WhatsAppProvider {
   private readonly logger = new Logger(MockWhatsAppProvider.name);
 
-  async send(to: string, message: string): Promise<void> {
+  send(to: string, message: string): Promise<void> {
     this.logger.log(`[MOCK WhatsApp] to ${to}: ${message}`);
+    return Promise.resolve();
   }
 }
