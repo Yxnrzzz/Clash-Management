@@ -9,16 +9,14 @@ Repo ini berisi dua paket:
 | Frontend Next.js | root (`src/`) | 3000 |
 | Backend NestJS | [`apps/api/`](./apps/api/README.md) | 3001 (prefix `/api`) |
 
-Seluruh deliverable frontend dari [ClashHub_Sprint_Plan.md](./ClashHub_Sprint_Plan.md) sudah diimplementasikan: Login/RBAC, Input Clash + lampiran, Clash Register (filter/sort/search/pagination/bulk update/export), Halaman Rincian (triase, komentar, audit trail), Clash Saya, Dashboard KPI dengan drill-down, Admin panel (User/Proyek/Master Data), Pengaturan Notifikasi, dan Import CSV.
+**Sprint 0-9 dari [ClashHub_Sprint_Plan.md](./ClashHub_Sprint_Plan.md) sudah selesai, backend dan frontend, dan tersambung penuh** — Login/RBAC, Input Clash + lampiran, Clash Register (filter/sort/search/pagination/bulk update/export), Halaman Rincian (triase, komentar, audit trail), Clash Saya, Dashboard KPI dengan drill-down, notifikasi email + WhatsApp async, Admin panel (User/Proyek/Master Data + template antar proyek), Pengaturan Notifikasi, dan Import CSV/XML massal (async, dedup, auto-create master data). **CI (GitHub Actions) dan Dockerfile produksi (web + api) juga sudah ada**, menutup utang Sprint 0. Sprint 10 (fitur AI, opsional) dan sisa Sprint 11 (uji beban, hardening keamanan, deploy) belum dikerjakan. Detail lengkap & catatan teknis ada di [HANDOFF.md](./HANDOFF.md) — dokumen itu adalah sumber kebenaran untuk status proyek, bukan file ini.
 
-**Backend Sprint 0 & 1 juga sudah selesai dan tersambung**: autentikasi JWT sungguhan dengan password argon2id, RBAC yang ditegakkan di server, dan CRUD user/proyek/master-data yang menulis ke PostgreSQL.
-
-> **Fase hybrid.** `project`, `users`, `disciplines`, `zones`, `statuses`, dan `priorities` datang dari API. `clashes`, `comments`, `auditLogs`, `attachments`, dan `notificationPreferences` **masih di `localStorage`** sampai `ClashesModule` dibangun. Detail lengkap di [HANDOFF.md](./HANDOFF.md).
+**Tidak ada lagi apa pun yang client-only.** Seluruh data (project, users, master data, clash, komentar, audit log, lampiran, preferensi notifikasi, job impor) tersimpan dan ditegakkan RBAC-nya di NestJS + PostgreSQL; `localStorage` sudah pensiun total.
 
 ## Tech stack
 
 **Frontend** — Next.js (App Router) + React + TypeScript, Tailwind CSS, TanStack Table, Recharts, Zod, SheetJS (xlsx), jsPDF.
-**Backend** — NestJS + Prisma + PostgreSQL 16, passport-jwt, `@node-rs/argon2`, class-validator, Jest.
+**Backend** — NestJS + Prisma + PostgreSQL 16, Redis + BullMQ (notifikasi & job impor async), passport-jwt, `@node-rs/argon2`, class-validator, fast-xml-parser, Jest.
 
 Sesuai rekomendasi final di PRD Bagian 4.2 / Sprint Plan.
 
@@ -33,6 +31,8 @@ npm --prefix apps/api exec prisma migrate deploy
 npm --prefix apps/api exec prisma db seed
 ```
 
+`docker compose up -d` menjalankan tiga service: `postgres`, `redis` (BullMQ — notifikasi & impor), dan `mailhog` (kotak masuk email dev, UI di `http://localhost:8025`).
+
 Lalu di dua terminal terpisah:
 
 ```bash
@@ -44,6 +44,18 @@ npm run dev
 ```
 
 Buka [http://localhost:3000](http://localhost:3000). Frontend mem-proxy `/api/*` ke backend lewat `rewrites` di `next.config.ts`, jadi tidak ada konfigurasi CORS yang perlu diurus. **Tanpa backend hidup, login akan gagal dan seluruh master data kosong.**
+
+### Menjalankan dengan Docker (produksi)
+
+Ada Dockerfile produksi terpisah untuk masing-masing paket (`Dockerfile` di root untuk web, `apps/api/Dockerfile` untuk api — keduanya multi-stage, image runner non-root). `docker-compose.prod.yml` di root menyatukan keduanya dengan Postgres + Redis:
+
+```bash
+cp apps/api/.env.example apps/api/.env   # lalu isi JWT_*_SECRET dsb dengan nilai produksi, bukan placeholder dev
+docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml exec api npx prisma migrate deploy
+```
+
+Ini **terpisah** dari `apps/api/docker-compose.yml` yang dipakai sehari-hari (dependensi dev saja — `postgres`/`redis`/`mailhog`, aplikasi tetap dijalankan via `npm run dev`); `docker-compose.prod.yml` menjalankan aplikasinya juga sebagai container.
 
 ## Akun demo
 
@@ -58,15 +70,13 @@ Password untuk semua akun: **`demo1234`** (di-hash argon2id di database). Admin 
 
 ## Struktur
 
-- `src/lib/api/` — lapisan HTTP. `client.ts` (access token di memori + retry otomatis lewat `/auth/refresh` saat 401), `mappers.ts` (satu-satunya tempat terjemahan istilah Inggris API ↔ Indonesia domain), `types.ts` (bentuk respons mentah).
-- `src/lib/data-context.tsx` — state aplikasi. **Hybrid**: master data di-fetch dari API, clash/komentar/audit/lampiran/preferensi masih dipersist ke `localStorage` (`clashhub-data-v3`).
-- `src/lib/mock-data.ts` — `INITIAL_*` + generator ~87 clash contoh. Sejak master data pindah ke API, `INITIAL_*` hanya dipakai oleh generator clash.
+- `src/lib/api/` — lapisan HTTP. `client.ts` (access token di memori + retry otomatis lewat `/auth/refresh` saat 401), `mappers.ts` (satu-satunya tempat terjemahan istilah Inggris API ↔ Indonesia domain), `types.ts` (bentuk respons mentah dari API), `import.ts` (fungsi impor massal & template master data).
+- `src/lib/data-context.tsx` — seluruh state aplikasi (project, users, master data, clash, komentar, audit log, lampiran, preferensi notifikasi) di-fetch dari API; tidak ada lagi persist ke `localStorage`.
 - `src/lib/use-master-data.ts` — hook lookup (`disciplineById`, `statusById`, dst.) yang terikat ke array master data *live*, bukan konstanta statis.
 - `src/lib/auth-context.tsx` — autentikasi sungguhan; sesi dipulihkan dari cookie refresh saat mount, dan `user` tetap diturunkan dari daftar user live sehingga perubahan role/nonaktivasi oleh Admin langsung berefek pada sesi yang berjalan.
-- `src/lib/lookup.ts` — helper format & aturan RBAC murni (hak edit, hak komentar).
+- `src/lib/lookup.ts` — helper format & aturan RBAC murni (hak edit, hak komentar) — UX saja; penegakan sesungguhnya ada di server.
 - `src/lib/export.ts` — export Excel (SheetJS) & PDF (jsPDF/autotable), menghormati filter aktif di Register.
-- `src/lib/csv.ts` — parser CSV minimal untuk wizard import.
-- `src/lib/dashboard-metrics.ts` — agregasi KPI, tren mingguan, dan sebaran per disiplin/prioritas/zona.
+- `src/lib/dashboard-metrics.ts` — port frontend dari agregasi KPI/tren/sebaran yang sebenarnya dihitung server-side (`GET /clashes/metrics`); dipakai untuk memformat, bukan menghitung ulang dari nol.
 - `src/components/dashboard/viz-tokens.ts` — warna chart hasil validasi (lihat catatan di bawah).
 - Halaman: `/login`, `/register`, `/clashes/new`, `/clashes/[id]`, `/my-clashes`, `/dashboard`, `/import`, `/settings/notifications`, `/admin/users`, `/admin/projects`, `/admin/master-data`.
 
@@ -82,32 +92,30 @@ Disiplin dan zona adalah kategori **nominal**, jadi keduanya memakai satu warna 
 ## RBAC yang diterapkan
 
 - **Management**: baca-saja di seluruh Register, Detail, & Dashboard; tidak bisa membuat clash, komentar, atau bulk update.
-- **Engineer**: bisa input clash baru; di item yang di-assign ke dirinya hanya bisa transisi status maju satu langkah (Open → In Progress → Resolved, tidak bisa menutup atau mundur); tidak bisa mengakses Dashboard atau Admin.
-- **Coordinator**: kelola penuh clash — assign, ubah prioritas/due date, semua transisi status, bulk update, import CSV; tidak bisa mengakses halaman Admin.
-- **Admin**: seperti Coordinator, ditambah akses penuh ke `/admin/*` (User, Proyek, Master Data).
+- **Engineer**: bisa input clash baru; di item yang di-assign ke dirinya hanya bisa transisi status maju satu langkah (Open → In Progress → Resolved, tidak bisa menutup atau mundur); tidak bisa mengakses Dashboard, Import, atau Admin.
+- **Coordinator**: kelola penuh clash — assign, ubah prioritas/due date, semua transisi status, bulk update, import CSV/XML massal; tidak bisa mengakses halaman Admin.
+- **Admin**: seperti Coordinator, ditambah akses penuh ke `/admin/*` (User, Proyek, Master Data — termasuk toggle aktif/nonaktif dan salin template antar proyek) serta opsi "buat master data otomatis" saat impor.
 
-RBAC ini ditegakkan di **dua** lapis: guard route di client (untuk UX) dan `RolesGuard` di NestJS (401 tanpa token, 403 untuk peran yang tidak berhak). Tabel endpoint lengkap ada di [apps/api/README.md](./apps/api/README.md).
+RBAC ini ditegakkan di **dua** lapis: guard route di client (untuk UX) dan `RolesGuard`/logika per-field di NestJS (401 tanpa token, 403 untuk peran yang tidak berhak) — lapisan client hanya UX, bukan pertahanan sesungguhnya. Tabel endpoint lengkap ada di [apps/api/README.md](./apps/api/README.md).
 
 ## Apa yang nyata, apa yang belum
 
 - **Master data** (user, disiplin, zona, prioritas, status) tersimpan di PostgreSQL dan dikelola lewat Admin panel — user baru langsung bisa login, disiplin yang dinonaktifkan langsung hilang dari form input baru (tapi tetap muncul di filter Register dengan label "(nonaktif)" untuk data historis). Penghapusan memakai pola **soft-delete** lewat `isActive` supaya clash lama tidak jadi orphan.
-- **Clash, komentar, audit log** masih di `localStorage`. `ClashesModule` adalah pekerjaan berikutnya.
-- **Lampiran** memakai `File` sungguhan dan menampilkan pratinjau nyata (object URL) selama sesi browser berjalan, tapi **tidak** bertahan setelah reload karena belum ada object storage. Halaman detail menampilkan pesan "pratinjau tidak tersedia setelah reload" alih-alih pura-pura masih ada.
+- **Clash, komentar, audit log, lampiran** tersimpan penuh di database (lampiran di disk lokal via `StorageService`, S3/R2-ready lewat seam yang sama). Tidak ada lagi batasan "hilang setelah reload".
+- **Notifikasi** email (via MailHog di dev) dan WhatsApp (mock provider, bukan Business API asli) berjalan async lewat BullMQ + Redis.
+- **Import massal** CSV dan XML (Navisworks/Solibri) diproses sebagai job async di server dengan dedup by `external_id` dan opsi auto-create master data (Admin).
+- **Belum ada**: fitur AI (Sprint 10, opsional), dan sisa hardening produksi — rate limiting, `helmet`, refresh-token rotation, global exception filter, load test terhadap target NFR 10.000 clash (Sprint 11). Dockerfile & CI sudah ada (lihat di atas).
 
 ## Reset data demo
 
-Clash & komentar (localStorage) — lewat DevTools console:
-
-```js
-localStorage.clear(); location.reload();
-```
-
-Master data & user (database) — seed bersifat idempoten:
+Master data & user (idempoten, aman dijalankan ulang):
 
 ```bash
 npm --prefix apps/api exec prisma db seed
 ```
 
+Clash/komentar/audit log **tidak** ikut di-reset oleh perintah di atas (disengaja — supaya data yang dibuat lewat aplikasi tidak tertimpa seed). Untuk reset penuh, kosongkan tabel `Clash`/`Comment`/`AuditLog`/`ImportJob` secara manual lalu jalankan ulang perintah seed — lihat "Catatan seed" di [apps/api/README.md](./apps/api/README.md).
+
 ## Lanjutan
 
-Berikutnya: **`ClashesModule`** (clash, komentar, audit log, lampiran) untuk menghabiskan sisa `localStorage`, lalu object storage untuk lampiran permanen, Redis/BullMQ untuk notifikasi email & WhatsApp asli (Sprint 5 & 8), fitur AI opsional (Sprint 10), dan hardening/deploy (Sprint 11). Detail rencana di [ClashHub_Sprint_Plan.md](./ClashHub_Sprint_Plan.md); catatan teknis & jebakan di [HANDOFF.md](./HANDOFF.md).
+**Sprint 11** (uji beban terhadap target NFR 10.000 clash, hardening keamanan — rate limiting/`helmet`/refresh-token rotation/global exception filter, observability, deploy ke lingkungan nyata), dan opsional **Sprint 10** (fitur AI: auto-kategorisasi + deteksi duplikat, wajib disertai eval harness berlabel). Detail rencana di [ClashHub_Sprint_Plan.md](./ClashHub_Sprint_Plan.md); catatan teknis, gotcha, dan status sesi-per-sesi di [HANDOFF.md](./HANDOFF.md).

@@ -1,4 +1,4 @@
-import { IsBoolean, IsInt, IsOptional, IsString, Min, MinLength } from 'class-validator';
+import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, Min, MinLength } from 'class-validator';
 
 export class CreateDisciplineDto {
   @IsString()
@@ -85,4 +85,21 @@ export class UpdateStatusDto {
 export class SetActiveDto {
   @IsBoolean()
   isActive!: boolean;
+}
+
+/** Project ids are NOT uuids (seed uses "proj-1") — see the module-level note
+ * in clash.dto.ts; same reasoning applies here. */
+export class CopyTemplateDto {
+  @IsString()
+  @MinLength(1, { message: 'Proyek sumber tidak valid' })
+  fromProjectId!: string;
+
+  @IsString()
+  @MinLength(1, { message: 'Proyek tujuan tidak valid' })
+  toProjectId!: string;
+
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Pilih minimal satu jenis data' })
+  @IsIn(['disciplines', 'zones'], { each: true, message: 'Jenis data tidak valid' })
+  include!: ('disciplines' | 'zones')[];
 }

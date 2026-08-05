@@ -1,9 +1,11 @@
 import type {
+  Attachment,
   AuditLogEntry,
   Clash,
   Comment,
   Discipline,
   NewClashInput,
+  NotificationPreference,
   Priority,
   Project,
   Role,
@@ -13,11 +15,13 @@ import type {
 } from "../types";
 import { WEEK_LABEL, type DashboardMetrics } from "../dashboard-metrics";
 import type {
+  ApiAttachment,
   ApiAuditLog,
   ApiClash,
   ApiComment,
   ApiDashboardMetrics,
   ApiDiscipline,
+  ApiNotificationPreference,
   ApiPriority,
   ApiProject,
   ApiRole,
@@ -162,6 +166,16 @@ export const toAuditLog = (a: ApiAuditLog): AuditLogEntry => ({
   createdAt: a.createdAt,
 });
 
+export const toAttachment = (a: ApiAttachment): Attachment => ({
+  id: a.id,
+  clashId: a.clashId,
+  namaFile: a.fileName,
+  tipe: a.fileType.startsWith("image/") ? "image" : a.fileType === "application/pdf" ? "pdf" : "other",
+  ukuranBytes: a.sizeBytes,
+  uploadedBy: a.uploadedById,
+  createdAt: a.createdAt,
+});
+
 export const newClashPayload = (input: Omit<NewClashInput, "attachments">) => ({
   title: input.judul,
   description: input.deskripsi,
@@ -177,6 +191,23 @@ export type ClashFieldPatch = Partial<{
   assigneeId: string | null;
   dueDate: string | null;
 }>;
+
+// --- Notification preference ----------------------------------------------
+
+export const toNotificationPreference = (p: ApiNotificationPreference): NotificationPreference => ({
+  userId: p.userId,
+  emailEnabled: p.emailEnabled,
+  whatsappEnabled: p.whatsappEnabled,
+  whatsappNumber: p.whatsappNumber,
+});
+
+export const notificationPreferencePayload = (
+  input: Partial<Omit<NotificationPreference, "userId">>
+) => ({
+  ...(input.emailEnabled !== undefined ? { emailEnabled: input.emailEnabled } : {}),
+  ...(input.whatsappEnabled !== undefined ? { whatsappEnabled: input.whatsappEnabled } : {}),
+  ...(input.whatsappNumber !== undefined ? { whatsappNumber: input.whatsappNumber } : {}),
+});
 
 // --- Dashboard metrics ---------------------------------------------------
 

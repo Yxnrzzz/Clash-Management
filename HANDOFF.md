@@ -1,7 +1,7 @@
 # ClashHub — Handoff Progress
 
-**Tanggal:** 2 Agustus 2026 (update ke-5)
-**Status:** Frontend selesai. **Sprint 1 + `ClashesModule` (Sprint 2/3/4) backend selesai dan tersambung**: auth JWT + argon2, RBAC, CRUD user/proyek/master-data, dan clash/komentar/audit log semuanya berjalan di NestJS + PostgreSQL dengan RBAC ditegakkan server-side. Fase hybrid **berakhir** untuk domain inti — hanya lampiran dan preferensi notifikasi yang masih di `localStorage` (menunggu object storage & modul notifikasi). **Update ke-5:** `GET /clashes` sekarang filter/sort/pagination server-side, dan `GET /clashes/metrics` (baru) menghitung KPI/tren/sebaran dashboard di server — lihat §12 lama, sekarang selesai. Konsekuensinya, `DataContext` tidak lagi memuat semua clash di bootstrap (lihat §5 "Clashes tidak lagi di-bulk-load").
+**Tanggal:** 5 Agustus 2026 (update ke-10)
+**Status:** Frontend selesai. **Sprint 0-9 backend selesai** (Sprint 10/11 belum, tapi utang CI/Dockerfile dari Sprint 0 sekarang sudah ditutup — lihat update ke-10): auth, RBAC, CRUD user/proyek/master-data, clash/komentar/audit log, lampiran, notifikasi email+WhatsApp, dan **impor massal CSV/XML async + template master data antar proyek** semuanya berjalan di NestJS + PostgreSQL + Redis (+ disk lokal untuk file) dengan RBAC ditegakkan server-side. **Tidak ada lagi apa pun yang client-only** — `localStorage` sudah pensiun total (termasuk parsing impor, yang sebelumnya satu-satunya sisa jalur client-only). **Update ke-10 (Tahap A — menutup utang infrastruktur Sprint 0):** ditemukan bahwa `npm --prefix apps/api run lint` gagal total sejak awal proyek (`apps/api` tidak pernah punya `eslint.config.mjs`) — sekarang ada (`apps/api/eslint.config.mjs`, flat config ESLint 10 + typescript-eslint), lint backend **hijau** (0 error, 6 warning bawaan `fast-xml-parser` yang untyped) setelah memperbaiki 5 temuan nyata (unused import di `clashes.service.ts`, double-cast berlebih & floating promise di `import.processor.ts`/`main.ts`, `no-base-to-string` di `xml.parser.ts`, async-tanpa-await di `whatsapp.service.ts`) — 79 test backend tetap lulus setelahnya. Ditambahkan `.github/workflows/ci.yml` (job `web`/`api`/`docker`, belum pernah jalan sungguhan di GitHub karena belum di-push) dan Dockerfile produksi (`Dockerfile` root + `apps/api/Dockerfile`, multi-stage, image non-root) — **keduanya sudah dibangun dan dijalankan lokal di sesi ini** (web: `server.js` boot dan `/login` merespons 200; api: Nest app boot penuh sampai semua module ter-inisialisasi). Worktree nyasar `.claude/worktrees/fervent-gauss-19c30b` yang membuat `npm run lint` root melaporkan ribuan error palsu sudah dihapus (`git worktree remove`), dan `.claude/**` ditambahkan ke ignore lint root sebagai sabuk pengaman. `apps/api/.env.example` sekarang ter-track git (sebelumnya tertelan `.gitignore`'s `.env*`). Lihat §12 untuk detail lengkap & yang masih di luar scope (uji beban, hardening keamanan). **Update ke-9:** Sprint 9 backend (`ImportModule`: `/import/preview`+`/import/commit`+`/import/jobs/:id` via BullMQ, parser CSV & XML/Navisworks/Solibri, dedup by `externalId`, auto-create master data Admin-only) dan `POST /master-data/templates/copy` selesai + 31 unit test baru (79 total) + terverifikasi live lewat browser (upload → mapping → commit → progress → audit log `"imported"` → dedup re-import → error report → auto-create sebagai Admin → import XML). Menemukan & memperbaiki satu bug nyata di jalur ini: frontend `auditText()` belum punya case untuk action `"imported"`, hasilnya `"Priadi mengubah dari \"undefined\" ke \"undefined\""` — lihat §5 "Impor massal" dan §9. **Update ke-8:** Sprint 5/8 (notifikasi email+WhatsApp async) yang di update ke-7 baru lolos unit test, sekarang **sudah diverifikasi end-to-end dengan Redis/MailHog/Postgres benar-benar hidup** (Docker bisa diakses di sesi ini, beda dari sesi sebelumnya) — assign clash → email masuk MailHog, ubah status → email ke assignee+reporter, toggle WhatsApp di preferensi → baris `Notification(channel=WHATSAPP, isSent=true)` tanpa fallback email, `OverdueScannerService.scan()` dijalankan manual 2x lewat `NestFactory.createApplicationContext` → 44 notifikasi baru lalu 0 di run kedua (dedup harian bekerja). Detail lengkap ada di §5 "Notifikasi async" (tidak berubah) — hanya status verifikasi yang naik dari "belum" ke "sudah". **Update ke-7** (sebelumnya): Sprint 5 (email async via BullMQ+MailHog) dan Sprint 8 (WhatsApp mock + preferensi kanal via API) selesai — lihat §5 "Notifikasi async: email (MailHog) + WhatsApp (mock)". **Update ke-6** (sebelumnya): lampiran (`Attachment`) pindah dari client-only/sesi-only ke object storage nyata di server (`StorageService`, disk lokal, S3/R2-ready) — lihat §5 "Lampiran: object storage lokal", juga menghilangkan batasan lama "pratinjau tidak tersedia setelah reload".
 **Lokasi proyek:** `D:\WebApp`
 
 Dokumen ini untuk melanjutkan pengerjaan di sesi/chat baru. Baca ini dulu sebelum menulis kode.
@@ -119,16 +119,27 @@ apps/api/src/
 ├── clashes/                      clash + komentar + audit log
 │   ├── clashes.controller.ts     GET /clashes (filter/sort/pagination), GET /clashes/metrics
 │   │                             (HARUS didaftarkan sebelum GET /:id — lihat komentar di file),
-│   │                             GET /:id, POST, PATCH /:id, POST /bulk, POST /:id/comments
+│   │                             GET /:id, POST, PATCH /:id, POST /bulk, POST /:id/comments,
+│   │                             POST /:id/attachments, GET /:clashId/attachments/:id/download
 │   ├── clashes.service.ts        RBAC per-field, generator uniqueCode, audit log server-side,
 │   │                             list() (where/orderBy/skip/take Prisma), metrics() (port dari
-│   │                             computeMetrics() frontend — keduanya harus tetap sinkron)
-│   └── clashes.service.spec.ts   17 test: RBAC, transisi status, closedAt, audit, uniqueCode,
-│                                  list() filter/sort/pagination, metrics() agregasi
+│   │                             computeMetrics() frontend — keduanya harus tetap sinkron),
+│   │                             applyPatch() memanggil NotificationsService setelah commit
+│   │                             (assigned/status_change) — lihat §5 "Notifikasi async"
+│   └── clashes.service.spec.ts   test: RBAC, transisi status, closedAt, audit, uniqueCode,
+│                                  list()/metrics(), attachment create/download
+├── storage/                      StorageService — file lampiran ke disk lokal (S3/R2-ready),
+│                                  lihat §5 "Lampiran: object storage lokal"
+├── notifications/                BullMQ producer (NotificationsService) + consumer
+│   │                             (NotificationsProcessor), EmailService (nodemailer + MailHog),
+│   │                             WhatsAppService (WhatsAppProvider interface + mock),
+│   │                             OverdueScannerService (cron harian 07:00),
+│   │                             NotificationPreferenceController/Service (GET/PATCH /me) —
+│   │                             lihat §5 "Notifikasi async"
 └── prisma/                       PrismaService
 ```
 
-**localStorage key:** `clashhub-data-v4` (naik dari v3 — clash/komentar/audit pindah ke API, bentuk `LocalState` menyusut jadi `{ attachments, notificationPreferences }`). Key `clashhub-auth-user-id` **sudah tidak dipakai** — sesi sekarang bersandar pada cookie `httpOnly` `clashhub_refresh`.
+**localStorage sekarang tidak dipakai sama sekali** — preferensi notifikasi (item terakhir yang masih client-only) pindah ke API di update ke-7. `clashhub-data-v5` tidak lagi dibaca/ditulis; kode hidrasinya sudah dihapus dari `data-context.tsx`, bukan sekadar dikosongkan. Key `clashhub-auth-user-id` **sudah tidak dipakai** — sesi sekarang bersandar pada cookie `httpOnly` `clashhub_refresh`.
 
 ---
 
@@ -223,9 +234,47 @@ Sekarang `master.clashesById: Record<string, Clash>` — **cache kecil, bukan da
 
 **Audit log & `uniqueCode` dibuat server-side.** `nilaiLama`/`nilaiBaru` diterjemahkan ke nama (status/prioritas/assignee), bukan id mentah — supaya riwayat tetap terbaca meskipun id-nya bukan uuid. `uniqueCode` dihitung dalam transaksi dengan retry sekali kalau kena `P2002` (dua user membuat clash di disiplin yang sama bersamaan).
 
-### Lampiran: File asli, tapi sesi-only (belum berubah)
+### Lampiran: object storage lokal (update ke-6)
 
-`NewClashInput.attachments[].file?: File` — form input mengirim `File` sungguhan, bukan cuma metadata, tapi lampiran **belum** ikut pindah ke backend (`ClashesModule` sengaja tidak mencakup ini — lihat §12). Setelah clash dibuat di server, `data-context.tsx` men-generate `URL.createObjectURL()` per lampiran dan menyimpannya di `attachmentPreviewUrls` (state React biasa) + metadata lampiran di `localStorage`. Blob URL tidak valid lagi setelah reload. Halaman detail menampilkan thumbnail gambar + link unduh kalau preview URL tersedia; kalau tidak (lampiran lama / setelah reload), tampil pesan jujur "pratinjau tidak tersedia setelah reload".
+Lampiran sekarang benar-benar tersimpan di server, bukan lagi sesi-only. `NewClashInput.attachments[].file?: File` tidak berubah di form input, tapi `data-context.tsx`'s `createClash()` sekarang meng-upload file lewat `POST /clashes/:id/attachments` (multipart, `FilesInterceptor`) setelah clash-nya dibuat, alih-alih menulis metadata ke `localStorage`.
+
+Backend: `apps/api/src/storage/storage.service.ts` (`StorageService`) menyimpan file ke disk di bawah `UPLOAD_DIR` (default `./uploads` relatif ke `apps/api`, key `${clashId}/${uuid}-${namaFileAsli}`) — satu-satunya tempat yang tahu path filesystem-nya; sisa kode (controller/service/frontend) hanya berurusan dengan `Attachment.id`. Didesain sebagai seam tunggal untuk pindah ke S3/R2 nanti (ganti isi file ini saja). Validasi tipe/ukuran/jumlah file (`image/*`/`application/pdf`, maks 10 MB, maks 10 file) ditegakkan ulang di server (`ClashesController.addAttachments`) — cek di frontend (`clashes/new/page.tsx`) cuma UX.
+
+Unduh lewat `GET /clashes/:clashId/attachments/:attachmentId/download` (terbuka untuk semua user login, sama seperti `GET /clashes/:id`). Karena access token disimpan di memori (bukan cookie — lihat Gotcha #11), `<img src=...>`/`<a href=...>` biasa tidak bisa membawa header `Authorization`; jadi frontend selalu fetch lampiran lewat `apiDownloadBlob()` (`lib/api/client.ts`) lalu bikin `URL.createObjectURL()` dari `Blob`-nya. Ini dilakukan di `clashes/[id]/page.tsx` lewat `useEffect` yang jalan tiap kali attachment baru muncul — bukan lagi di `data-context.tsx` seperti sebelumnya — sehingga preview **selalu di-fetch ulang dari server**, bukan di-cache saat pembuatan. Konsekuensinya, batasan lama "pratinjau tidak tersedia setelah reload" **sudah tidak berlaku**.
+
+### Notifikasi async: email (MailHog) + WhatsApp (mock) (update ke-7)
+
+Sprint 5 (email) dan Sprint 8 (WhatsApp + preferensi) selesai sekaligus. Alurnya: `ClashesService.applyPatch()` — satu-satunya jalur tulis untuk `update()` dan `bulkUpdate()`, sudah menghitung label lama/baru per field yang berubah — memanggil `NotificationsService` **setelah** transaksi commit:
+- `assigneeId` berubah ke non-null → `enqueueAssigned(clashId, assigneeId)`.
+- `statusId` berubah → `enqueueStatusChange(clashId, recipients, oldLabel, newLabel)`, `recipients` = gabungan `{assigneeId, reporterId}` (setelah patch, minus null, minus actor sendiri). **Ini asumsi produk**, bukan dari sprint plan literal (yang cuma bilang "notifikasi terpicu saat status berubah" tanpa merinci penerima) — kalau ternyata harus assignee-only, ubah di `ClashesService.publishNotifications()`.
+
+Enqueue ini **fire-and-forget** (`.catch()` + `Logger.warn`, tidak di-`await` sebagai bagian dari response): kegagalan queue (mis. Redis mati) tidak boleh menggagalkan update clash itu sendiri.
+
+Worker (`NotificationsProcessor`, `@Processor('notifications')`) memuat `NotificationPreference` user (default `{ emailEnabled: true, whatsappEnabled: false }` kalau belum ada baris — sama seperti default di `settings/notifications/page.tsx`), kirim ke kanal aktif, dan **selalu fallback ke email kalau WhatsApp gagal** — terlepas dari toggle email user (spesifik dari Sprint 8). Satu baris `Notification` ditulis per kanal yang benar-benar dicoba (`isSent` true/false).
+
+**Email:** `EmailService` pakai `nodemailer` ke MailHog (`SMTP_HOST`/`SMTP_PORT` di `.env`, tanpa auth) — bukan SMTP produksi. Lihat email yang "terkirim" di `http://localhost:8025`. Ganti ke SMTP asli tinggal isi `auth` di `email.service.ts` dan ubah env.
+
+**WhatsApp:** `WhatsAppService` adalah interface (`WhatsAppProvider`) + `MockWhatsAppProvider` yang cuma log dan menganggap selalu berhasil — **bukan integrasi WhatsApp Business API asli**. Pola sama seperti `StorageService`: satu binding di `NotificationsModule` (`{ provide: WHATSAPP_PROVIDER, useClass: MockWhatsAppProvider }`) yang diganti kalau mau pasang provider asli (mis. Meta Cloud API), tanpa menyentuh `NotificationsProcessor`.
+
+**Overdue scanner:** `OverdueScannerService` jalan cron harian jam 07:00 (`@Cron('0 7 * * *')`), cari clash `dueDate < now` + belum closed + ada assignee, skip pasangan clash+assignee yang sudah dapat notifikasi `OVERDUE` hari itu (dedup by `Notification.createdAt >= startOfToday`).
+
+**Preferensi notifikasi pindah dari `localStorage` ke API** — `GET`/`PATCH /notification-preferences/me`, upsert per user dari JWT (bukan body — tidak bisa ubah preferensi orang lain). Validasi E.164 untuk `whatsappNumber` ada di server (`NotificationPreferenceService`) juga, bukan cuma di form frontend. `data-context.tsx` fetch ini sekaligus di `reloadMasterData()`; `settings/notifications/page.tsx` sekarang manggil `updateNotificationPreference()` (async) alih-alih `setNotificationPreference()` (sync, localStorage).
+
+### Impor massal: CSV/XML async + dedup (update ke-9)
+
+Sprint 9 backend selesai. Sebelumnya `/import` mem-parse file **di browser** (`src/lib/csv.ts`) lalu menembak `POST /clashes` satu request per baris — tidak ada job async, tidak ada idempotensi, XML di-scope-cut. Sekarang seluruhnya pindah ke `apps/api/src/import/` (`ImportModule`):
+
+- `POST /import/preview` (multipart, maks 10 MB) mem-parse file (CSV via parser ported dari `src/lib/csv.ts` lama; XML lewat `fast-xml-parser`, mendukung bentuk atribut Navisworks `<clashresult>` dan Solibri `<issue>` — lihat `src/import/parsers/`), menyimpannya lewat `StorageService` di bawah prefix `imports/`, dan mengembalikan `{ token, columns, sampleRows, totalRows, suggestedMapping }`. `token` = storage key, dipakai `commit` supaya file tidak perlu di-upload ulang.
+- `POST /import/commit` `{ token, fileName, mapping, autoCreateMasterData? }` membuat baris `ImportJob` (status `QUEUED`) dan `queue.add()` ke antrean BullMQ `import`, **tidak menunggu prosesnya** — langsung balas `{ jobId }`. `autoCreateMasterData: true` ditolak 403 untuk non-Admin.
+- `GET /import/jobs/:id` — status/progres/laporan error, di-poll frontend tiap 1 detik. Di-scope ke pembuat job atau Admin.
+- `ImportProcessor` (`@Processor('import')`) memproses tiap baris dalam **transaksi terpisah** lewat `ClashesService.createClashRecord()` — method baru yang diekstrak dari `ClashesService.create()` supaya generate-`uniqueCode`-plus-retry-`P2002` tidak disalin-tempel. Baris sukses ditulis dengan `AuditLog.action = "imported"` (bukan `"created"`) — **frontend `auditText()` di `clashes/[id]/page.tsx` sudah di-update untuk case ini**; kalau lupa menambah case baru untuk action baru di masa depan, hasilnya string `"undefined"`/`"undefined"` yang lolos type-check tapi salah di runtime (ditemukan & diperbaiki di sesi ini, lihat §9).
+- **Dedup**: kalau mapping menyertakan kolom `externalId`, `(projectId, externalId)` yang sudah ada di-skip (`skippedRows`, bukan `failedRows`). Constraint unique di DB adalah penjaga akhir untuk race antar job — kalau kena, `createClashRecord()` melempar `DuplicateExternalIdError` alih-alih retry `uniqueCode`, dan `ImportProcessor` menangkapnya sebagai skip juga.
+- **Auto-create master data** (Admin-only): disiplin/zona/prioritas dari file yang tidak dikenal dibuat otomatis alih-alih membuat barisnya gagal.
+- Migrasi baru: `Clash.externalId` (nullable, `@@unique([projectId, externalId])`) + model `ImportJob` (progres/laporan per job).
+
+**Template master data antar proyek** (sisa deliverable Sprint 9): `POST /master-data/templates/copy` `{ fromProjectId, toProjectId, include }` (Admin), menyalin disiplin/zona **aktif** yang belum ada di tujuan — idempoten. ClashHub masih single-project (tidak ada create/switch-project), jadi ditambah `GET /projects` (Admin) minimal supaya dialog "Salin dari proyek lain" di `/admin/master-data` punya sesuatu untuk dipilih — kalau cuma ada satu proyek, dialog bilang begitu apa adanya alih-alih berpura-pura.
+
+Frontend: `src/app/import/page.tsx` ditulis ulang total — upload lewat `apiUpload()`, terima kolom & saran mapping dari server (bukan menghitungnya sendiri), commit lalu poll job dengan `setTimeout` chain (bukan `setInterval`, supaya tidak ada request tumpang tindih) yang di-`clearTimeout` saat unmount. `src/lib/csv.ts` dan `csv.test.ts` **dihapus** — satu-satunya konsumen (`import/page.tsx`) sudah tidak memakainya lagi.
 
 ---
 
@@ -248,16 +297,16 @@ Aturan terpusat di frontend: `src/lib/lookup.ts` (`canEditClash`, `canComment`) 
 
 | Sprint | Fokus | Status | Catatan |
 |---|---|---|---|
-| 0 | Fondasi backend | ✅ Selesai | NestJS + Prisma + PostgreSQL, 2 migrasi ter-apply, seed idempoten, `/api/health` |
+| 0 | Fondasi backend | ✅ Selesai | NestJS + Prisma + PostgreSQL, 4 migrasi ter-apply, seed idempoten, `/api/health`. CI (`.github/workflows/ci.yml`) + Dockerfile produksi (web & api) ditambahkan update ke-10 — lihat §12 untuk detail & yang masih tersisa |
 | 1 | Auth, RBAC, Administrasi | ✅ Selesai | JWT + argon2id, RolesGuard/ProjectMemberGuard, CRUD user/proyek/master-data, **frontend tersambung**, 12 unit test lulus |
-| 2 | Input clash + lampiran | 🟢 Clash selesai, lampiran belum | Clash dari DB via `ClashesModule`; lampiran masih localStorage (belum ada object storage) |
+| 2 | Input clash + lampiran | ✅ Selesai | Clash dari DB via `ClashesModule`; lampiran tersimpan di disk lewat `StorageService` (update ke-6, lihat §5 "Lampiran") |
 | 3 | Clash Register | ✅ Selesai | Data clash dari DB, filter/sort/pagination server-side (`GET /clashes`, update ke-5) |
-| 4 | Detail, komentar, audit, triase | 🟢 Selesai (1 gap kecil) | Komentar & audit dari DB (lazy-load per clash), RBAC field-level di server, audit trail server-generated — tapi tab Riwayat tidak refresh otomatis setelah edit di sesi yang sama, butuh reload (lihat task terpisah yang di-spawn saat verifikasi update ke-5, belum dikerjakan) |
-| 5 | Notifikasi email async | ❌ Belum | Butuh Redis + BullMQ (Redis ada di compose, belum dijalankan) |
+| 4 | Detail, komentar, audit, triase | ✅ Selesai | Komentar & audit dari DB (lazy-load per clash), RBAC field-level di server, audit trail server-generated; tab Riwayat sekarang refresh otomatis setelah edit (`updateClashField` memanggil `loadClashDetail` — diperbaiki di commit `548db09`) |
+| 5 | Notifikasi email async | ✅ Selesai, terverifikasi live | BullMQ + Redis, `NotificationsProcessor` kirim email via MailHog (update ke-7, lihat §5 "Notifikasi async"); diverifikasi end-to-end di update ke-8 |
 | 6 | Dashboard Manajemen | ✅ Selesai | Agregasi (KPI/tren/sebaran) dihitung server-side (`GET /clashes/metrics`, update ke-5) |
 | 7 | Export Excel/PDF + Bulk update | ✅ Selesai | Export client-side (SheetJS + jsPDF); bulk update sekarang lewat `POST /clashes/bulk` |
-| 8 | WhatsApp + preferensi kanal | 🟢 Frontend selesai | Kolom `whatsappNumber` sudah ada di skema; preferensi masih di localStorage |
-| 9 | Bulk import CSV/XML | 🟢 Frontend selesai (CSV saja) | Commit sekarang lewat `POST /clashes` async per baris (bukan localStorage); XML di-scope-cut |
+| 8 | WhatsApp + preferensi kanal | ✅ Selesai, terverifikasi live | `WhatsAppService` mock (bukan Business API asli — lihat §5), preferensi pindah dari localStorage ke `GET`/`PATCH /notification-preferences/me` (update ke-7); diverifikasi end-to-end di update ke-8 |
+| 9 | Bulk import CSV/XML | ✅ Selesai (update ke-9) | `ImportModule` async via BullMQ (`/import/preview`+`/commit`+`/jobs/:id`), CSV & XML (Navisworks/Solibri), dedup by `externalId`, auto-create master data (Admin), `POST /master-data/templates/copy`; lihat §5 "Impor massal" |
 | 10 | Fitur AI (opsional) | ❌ Belum | Butuh eval harness + AI asli |
 | 11 | Hardening, performa, deploy | ❌ Belum | |
 
@@ -303,7 +352,7 @@ c. **Prisma `ClashUpdateInput` (checked) tidak mengekspos field FK skalar** keti
 7. **Next 16 hanya izinkan satu instance `next dev`** per proyek (lockfile). Jangan jalankan dua dev server. Hal serupa berlaku untuk backend: proses `nest start --watch` yang menumpuk akan **mengunci `node_modules/.prisma/client/query_engine-windows.dll.node`** sehingga `npx prisma generate` gagal dengan `EPERM`. Kalau kena itu, matikan dulu semua proses node yang menunjuk ke `D:\WebApp`.
 8. **Warna chart divalidasi, bukan dikira-kira.** Kalau mengubah hex di `viz-tokens.ts`, jalankan ulang skill `dataviz` → `scripts/validate_palette.js`. Kategori nominal (disiplin, zona) pakai satu warna datar; hanya prioritas (tingkatan berurutan) yang boleh pakai ramp — dan array prioritas HARUS di-sort by `bobot` dulu sebelum dipetakan ke ramp (lihat §8.5).
 9. **Testing browser di lingkungan ini kadang menembak race condition palsu.** Firing beberapa `.click()` sinkron dalam satu loop tanpa `await`/delay antar klik bisa membuat elemen DOM lama (sebelum re-render React) jadi stale reference — hasilnya klik kelihatan "gagal" padahal app-nya benar. Selalu beri jeda kecil (~50ms) antar interaksi saat menguji lewat `javascript_tool`.
-10. **`localStorage` key sekarang `clashhub-data-v4`** (v1 → v2 saat master data jadi mutable, v2 → v3 saat master data pindah ke API, v3 → v4 saat clash/komentar/audit pindah ke API). Tidak ada migrasi: kalau `JSON.parse` gagal, data lama hilang dan di-seed ulang. Kalau mengubah bentuk `LocalState` lagi, naikkan versinya.
+10. **`localStorage` key sekarang `clashhub-data-v5`** (v1 → v2 saat master data jadi mutable, v2 → v3 saat master data pindah ke API, v3 → v4 saat clash/komentar/audit pindah ke API, v4 → v5 saat lampiran pindah ke object storage server-side). Tidak ada migrasi: kalau `JSON.parse` gagal, data lama hilang dan di-seed ulang. Kalau mengubah bentuk `LocalState` lagi, naikkan versinya.
 11. **Access token TIDAK boleh dipindah ke `localStorage`.** Sekarang disimpan di variabel modul `src/lib/api/client.ts` supaya tidak terbaca XSS; ketahanan sesi datang dari cookie refresh `httpOnly`, bukan dari menyimpan token di disk.
 12. **Jangan tambahkan CORS di backend.** `next.config.ts` mem-proxy `/api/*` ke `localhost:3001` lewat `rewrites`, jadi dari sisi browser semuanya same-origin dan cookie tetap first-party. Menambah CORS + `credentials: "include"` hanya akan menambah permukaan masalah tanpa manfaat.
 13. **Id master data (disiplin/zona/prioritas/status/user) BUKAN uuid untuk baris hasil seed** — jangan pakai `@IsUUID()` di DTO backend untuk field yang mereferensikannya. Lihat §5 dan §8a.
@@ -311,6 +360,12 @@ c. **Prisma `ClashUpdateInput` (checked) tidak mengekspos field FK skalar** keti
 15. **Testing browser via `javascript_tool` di lingkungan ini: `await` top-level sering gagal dengan `SyntaxError`.** Pola yang jalan: bungkus dalam `(function() { ... })()` (IIFE, bukan arrow function kalau butuh `return`), atau untuk `fetch` async simpan hasilnya ke `window.__namaVariabel` di satu panggilan lalu baca di panggilan berikutnya. Redeclare `const`/`let` dengan nama sama di beberapa panggilan juga akan error ("Identifier ... has already been declared") karena scope tampaknya persisten antar panggilan — pakai IIFE atau nama variabel unik.
 16. **`ClashesController.metrics()` (`GET /clashes/metrics`) HARUS didaftarkan sebelum `findOne()` (`GET /:id`).** NestJS/Express mencocokkan route sesuai urutan deklarasi di kelas — kalau `:id` dideklarasikan lebih dulu, request ke `/clashes/metrics` akan ketangkap sebagai `id="metrics"` alih-alih handler metrics. Kalau menambah route statis baru di bawah `/clashes`, taruh sebelum `:id`.
 17. **`GET /clashes/metrics`'s `from`/`to` beda kontrak dari `GET /clashes`'s `cf`/`ct`.** `cf`/`ct` (dipakai Register) adalah tanggal saja (`YYYY-MM-DD`, dari `<input type="date">`) — backend yang menambahkan waktu akhir hari. `from`/`to` (dipakai Dashboard) adalah ISO instant lengkap (`Date#toISOString()`, sudah termasuk waktu & `Z`) — backend memakainya langsung tanpa modifikasi. Jangan disamakan formatnya kalau menyalin pola salah satu ke yang lain.
+18. **`ClashesService.publishNotifications()` sengaja fire-and-forget** (`.catch()` + `Logger.warn`, bukan `await` di jalur request). Kalau Redis mati atau `queue.add()` gagal, `update()`/`bulkUpdate()` tetap harus sukses — notifikasi itu efek samping, bukan syarat clash-nya tersimpan. Jangan ubah jadi `await` tanpa try/catch, atau satu masalah Redis bisa menggagalkan semua edit clash.
+19. **Sandbox agen di sesi update ke-7 tidak bisa menjalankan Docker** (`docker`/`docker compose` gagal connect ke named pipe Docker Desktop, dari Bash maupun PowerShell tool) meski Postgres yang sudah berjalan sebelumnya tetap kedeteksi (proses lain di luar sandbox). Kalau sesi berikutnya kena hal serupa, itu bukan masalah `docker-compose.yml`-nya — jalankan `docker compose up -d` dari terminal biasa di luar tool, atau minta user yang menjalankan.
+20. **`NotificationPreferenceController` tidak punya `@Roles()`** — sengaja, karena setiap route-nya di-scope ke `/me` lewat `@CurrentUser()`, bukan ke id dari client. Jangan tambah parameter `userId` yang bisa dikontrol caller ke endpoint ini; itu akan membuka celah user A mengubah preferensi user B.
+21. **Menambah `AuditLog.action` baru? Update `auditText()` di `clashes/[id]/page.tsx` juga.** Fungsi itu cuma punya case eksplisit untuk `"created"`; action lain jatuh ke cabang default yang mengasumsikan ada `field`/`oldValue`/`newValue` (dipakai untuk log perubahan field). Action tanpa field seperti `"imported"` (ditambah di update ke-9 untuk baris hasil impor) lolos type-check tapi merender `'... mengubah "" dari "undefined" ke "undefined".'` di runtime — cuma ketahuan lewat klik manual di browser, bukan dari test atau type-check. Ditemukan & diperbaiki di update ke-9.
+22. **`docker compose` di `apps/api/docker-compose.yml` dijalankan dari CWD `apps/api`, bukan root** — `docker compose -f docker-compose.yml up -d` (bukan `-f apps/api/docker-compose.yml` dari root sambil `cwd` masih di `apps/api` dari perintah sebelumnya) akan mencoba path `apps/api/apps/api/docker-compose.yml` dan gagal "cannot find the path specified". Kalau tool Bash-mu mempertahankan `cd` antar panggilan (banyak yang begitu), cek `pwd` dulu sebelum menulis path relatif.
+23. **Tool Bash otomatis yang "mencoba" set `input.files` lewat `form_input`/`.value =` pada `<input type=file>` akan gagal** (`InvalidStateError`, dilindungi browser). Yang berhasil: `javascript_tool` bikin `File` + `DataTransfer`, `input.files = dt.files`, lalu `input.dispatchEvent(new Event('change', {bubbles: true}))` — React menangkap event native ini lewat listener di root, jadi `onChange` tetap terpanggil. Dipakai untuk menguji `/import` end-to-end di update ke-9.
 
 ---
 
@@ -326,6 +381,8 @@ npm --prefix apps/api exec prisma migrate deploy
 npm --prefix apps/api exec prisma db seed
 ```
 
+Sejak update ke-7, `docker compose up -d` menjalankan **tiga** service, bukan dua: `postgres`, `redis` (dipakai BullMQ — sebelumnya nganggur), dan `mailhog` (kotak masuk email dev, UI di `http://localhost:8025`). Tanpa Redis hidup, `NotificationsProcessor` tidak akan memproses job (enqueue tetap jalan, tapi `.catch()` di `ClashesService.publishNotifications` cuma mencatat warning — clash update-nya sendiri tetap sukses, lihat §5 "Notifikasi async").
+
 ```bash
 npm --prefix apps/api run start:dev   # API  → http://localhost:3001/api
 ```
@@ -337,9 +394,17 @@ npm run dev                            # Web → http://localhost:3000
 Pemeriksaan:
 
 ```bash
-npm run build && npm run lint          # frontend
-npm --prefix apps/api run build        # backend
-npm --prefix apps/api test             # 29 unit test (RolesGuard, AuthService, ClashesService)
+npm run build && npm run lint && npm test   # frontend (build+lint+31 test)
+npm --prefix apps/api run build             # backend
+npm --prefix apps/api run lint              # backend lint (sejak update ke-10, lihat §1) — 0 error, 6 warning (fast-xml-parser untyped, sudah didokumentasikan di apps/api/eslint.config.mjs)
+npm --prefix apps/api test                  # 79 unit test (RolesGuard, AuthService, ClashesService, NotificationsProcessor, OverdueScannerService, NotificationPreferenceService, ImportProcessor, ImportService, parser CSV/XML, MasterDataService.copyTemplate)
+```
+
+Docker (opsional, untuk memverifikasi image produksi — lihat README §"Menjalankan dengan Docker"):
+
+```bash
+docker build -t clashhub-web .
+docker build -t clashhub-api apps/api
 ```
 
 Performa: mode dev ~5x lebih lambat dari production. Untuk menilai kelancaran UI sesungguhnya, ukur di `npm run build && npm start`.
@@ -358,13 +423,17 @@ Drill-down dashboard → register memakai parameter yang sama (termasuk `overdue
 
 ## 12. Rekomendasi langkah berikutnya
 
-- **Object storage untuk lampiran (disk lokal dulu)** — prasyarat agar lampiran bertahan setelah reload (lihat §5 "Lampiran"). `Attachment.fileUrl` sudah ada di skema tapi belum ada yang mengisinya. Rencana: `apps/api/uploads/` + endpoint upload multipart + endpoint download terproteksi, di balik abstraksi storage supaya gampang pindah ke S3/R2 nanti.
+- ~~Object storage untuk lampiran (disk lokal dulu)~~ — **selesai (update ke-6)**, lihat §5 "Lampiran: object storage lokal". Masih S3/R2-ready lewat `StorageService`, belum ada implementasi cloud-nya — kerjakan itu kalau memang butuh multi-instance/deploy.
 - ~~Filter/sort/pagination server-side untuk `GET /clashes`~~ — **selesai (update ke-5)**, lihat §5 "Clashes tidak lagi di-bulk-load".
 - ~~Endpoint agregasi dashboard~~ — **selesai (update ke-5)**, `GET /clashes/metrics`.
-- **Riwayat (audit trail) tidak refresh otomatis setelah edit** — ditemukan saat verifikasi browser update ke-5: `updateClashField()` di `data-context.tsx` menulis clash yang diperbarui ke `clashesById`, tapi tidak memuat ulang audit log clash itu, jadi tab "Riwayat" di halaman detail baru menunjukkan baris baru setelah reload manual. Server-nya sudah benar (baris `AuditLog` tertulis saat itu juga). Bug pre-existing, bukan regresi dari update ke-5 (dikonfirmasi lewat `git diff` — `updateClashField` memang belum pernah menyentuh `auditLogs`). Task terpisah sudah di-spawn untuk ini, belum dikerjakan.
 - **Verifikasi target performa PRD di data besar (masih relevan meski pagination sudah server-side)** — seed sekarang 87-90 clash; setelah update ke-5, `GET /clashes` dan `/clashes/metrics` sudah query Prisma langsung (bukan muat-semua-lalu-filter-di-JS), tapi belum ada index/query tuning khusus atau load test terhadap target 10.000 clash. Itu tetap pekerjaan Sprint 11.
-- **Sprint 5/8 (notifikasi email + WhatsApp async)** — jalankan Redis dari `docker-compose.yml`, tambah BullMQ. Skema `Notification` & `NotificationPreference` sudah siap, termasuk `whatsappNumber`. `notificationPreferences` juga perlu dipindah dari localStorage ke API (pola sama seperti `ClashesModule`).
+- ~~Sprint 5/8 (notifikasi email + WhatsApp async)~~ — **selesai (update ke-7), dan sudah diverifikasi live (update ke-8)**, lihat §5 "Notifikasi async" dan §1. Kelima langkah verifikasi (assign→email, status change→email 2 penerima, toggle WhatsApp→`Notification(channel=WHATSAPP, isSent=true)` tanpa fallback, `OverdueScannerService.scan()` 2x→44 baru lalu 0 dedup) semuanya lolos di sesi update ke-8 dengan Docker (`postgres`+`redis`+`mailhog`) benar-benar hidup — bukan lagi cuma mock. Catatan infra: di sesi update ke-8, `docker exec clashhub-postgres psql` sempat terlihat menunjukkan database kosong (0 tabel) padahal aplikasi jalan normal dengan data lengkap — ternyata `docker exec` tidak menjangkau proses postgres yang sebenarnya dipakai (ada ambiguitas engine/context Docker Desktop di mesin ini). Kalau butuh query DB langsung dari sesi Claude Code berikutnya, jangan pakai `docker exec ... psql`; pakai `node -e` dengan `@prisma/client` dari `apps/api` (connect via `DATABASE_URL` di `.env`, TCP asli, terbukti akurat) — lihat pola query yang dipakai di verifikasi ini kalau perlu contoh.
+- **WhatsApp masih mock** (`MockWhatsAppProvider` di `apps/api/src/notifications/whatsapp.service.ts`) — kalau mau kirim WhatsApp sungguhan, ganti binding `WHATSAPP_PROVIDER` di `NotificationsModule` dengan implementasi `WhatsAppProvider` yang memanggil provider asli (mis. Meta Cloud API); `NotificationsProcessor` tidak perlu diubah.
+- **Email lewat MailHog, bukan SMTP produksi** — ganti `SMTP_HOST`/`SMTP_PORT` di `.env` dan tambah `auth` di `email.service.ts` kalau provider aslinya butuh kredensial.
 - **Refresh token rotation & blacklist** — saat ini refresh token hanya diverifikasi tanda tangannya; logout menghapus cookie tapi token yang sudah dicuri masih valid sampai kedaluwarsa. Belum kritis untuk demo, wajib sebelum produksi (Sprint 11).
 - **Hardening (Sprint 11)** — belum ada global exception filter (error Prisma mentah seperti `P2002`/`P2003` di luar jalur yang sudah ditangani bisa bocor jadi 500), belum ada logging, belum ada rate limit di `/auth/login`, belum ada `helmet`, belum ada validasi skema env (`DATABASE_URL` hilang baru ketahuan saat query pertama, bukan saat boot). Kredensial demo di-hardcode di `login/page.tsx` — wajib dihapus sebelum deploy sungguhan.
-- **Tes otomatis frontend** — masih nol. Kandidat kuat: `dashboard-metrics.ts` (fungsi murni, sekarang tidak dipanggil `DashboardView` tapi masih dijaga sebagai referensi formula untuk `ClashesService.metrics()`) dan `allowedStatusTransitions` di `use-master-data.ts`. Backend sudah punya 29 test (12 lama + 14 `ClashesService` RBAC/create + 3 `list()`/`metrics()`).
-- **Dockerfile + CI** — belum ada sama sekali. Deliverable CI Sprint 0 sebenarnya belum terpenuhi.
+- **Tes otomatis frontend** — Vitest disiapkan (`vitest.config.mts` + `vitest.setup.ts`, jsdom + Testing Library), 3 file/31 test lulus: `Badge.test.tsx`, `dashboard-metrics.test.ts`, `lookup.test.ts` (`csv.test.ts` dihapus di update ke-9 bersama `csv.ts` — konsumen terakhirnya, `import/page.tsx`, sudah tidak memakainya). Kandidat berikutnya: `allowedStatusTransitions` di `use-master-data.ts`, dan komponen React yang lebih interaktif (`RegisterView`, `BulkToolbar`). Backend sekarang 79 test (48 sebelumnya + 31 baru di update ke-9: `ImportProcessor`, `ImportService`, parser CSV/XML, `MasterDataService.copyTemplate`). Jalankan dengan `npm test` (`npm run test:watch` untuk mode watch).
+- ~~Sprint 9 (bulk import CSV/XML + template master data)~~ — **selesai (update ke-9)**, lihat §5 "Impor massal" dan §7.
+- ~~Dockerfile + CI~~ — **selesai (update ke-10)**. `.github/workflows/ci.yml` (job `web`, `api`, `docker` — build image tanpa push, hanya jalan setelah `web`+`api` lulus), `Dockerfile` root (Next.js, `output: "standalone"`, multi-stage, non-root), `apps/api/Dockerfile` (NestJS, `prisma generate` di stage builder, client Prisma di-copy eksplisit ke stage prod-deps supaya tidak hilang kena `npm ci --omit=dev` yang fresh), `docker-compose.prod.yml` (web+api+postgres+redis, terpisah dari `apps/api/docker-compose.yml` yang tetap dipakai untuk dev). Kedua image sudah dibangun **dan dijalankan** lokal di sesi ini (bukan cuma `docker build` sukses) — web: container boot, `/login` respons 200; api: Nest app boot sampai semua module (`AppModule`, `AuthModule`, dst.) ter-inisialisasi. **Catatan jujur**: workflow CI belum pernah benar-benar dieksekusi di GitHub karena sesi ini tidak melakukan `git push` — perintah di dalamnya divalidasi dengan menjalankan urutan yang sama secara manual (lint, test, build, docker build), bukan lewat `act` (tidak terpasang di sandbox). Push & lihat run pertama adalah langkah pertama sesi berikutnya kalau CI mau benar-benar tervalidasi di GitHub.
+- ~~Lint backend tidak pernah benar-benar jalan~~ — **selesai (update ke-10)**. `apps/api/eslint.config.mjs` baru (flat config ESLint 10 + typescript-eslint, `recommendedTypeChecked`); `npm --prefix apps/api run lint` sekarang 0 error (6 warning tersisa, semuanya dari `no-explicit-any`/`no-unsafe-*` pada hasil `fast-xml-parser.parse()` yang memang untyped — didokumentasikan sebagai `warn` yang disengaja di komentar config, bukan diabaikan diam-diam). Rule `unbound-method` dan `no-unnecessary-type-assertion` dimatikan khusus untuk `*.spec.ts` — keduanya false-positive sistematis pada pola Jest `expect(mock.method).toHaveBeenCalledWith(...)`, bukan bug. 5 temuan nyata di kode aplikasi (bukan test) diperbaiki: import mati (`BulkUpdatePatchDto` di `clashes.service.ts`), double-cast berlebih (`import.processor.ts`), floating promise di `bootstrap()` (`main.ts`, sekarang `.catch()` + `process.exit(1)`), `no-base-to-string` di `xml.parser.ts` (helper `stringifyCell()` baru, whitelist tipe primitif eksplisit alih-alih `String(unknown)` mentah), dan `async` tanpa `await` di `MockWhatsAppProvider.send()`. 79 test backend tetap lulus setelah semua perbaikan ini.
+- ~~Worktree nyasar~~ — **dihapus (update ke-10)** lewat `git worktree remove` (bukan `rm -rf` manual) setelah dikonfirmasi bersih (`git status` kosong). `git worktree list` sekarang cuma satu baris. `.claude/**` juga ditambahkan ke `globalIgnores` di `eslint.config.mjs` root sebagai sabuk pengaman kalau ada worktree/scratch serupa di masa depan.

@@ -21,6 +21,14 @@ services:
     volumes:
       - clashhub-redis-data:/data
 
+  mailhog:
+    image: mailhog/mailhog
+    container_name: clashhub-mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025" # SMTP
+      - "8025:8025" # Web UI
+
 volumes:
   clashhub-postgres-data:
   clashhub-redis-data:

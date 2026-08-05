@@ -175,12 +175,9 @@ export function DashboardView() {
   return (
     <div className="mx-auto max-w-7xl px-6 py-8">
       <div className="mb-1 flex items-baseline justify-between">
-        <h1 className="text-xl font-semibold text-zinc-900">Dashboard Manajemen</h1>
+        <h1 className="text-xl font-semibold text-zinc-900">Dashboard</h1>
         <span className="text-xs text-zinc-400">{metricsLoading ? "Memperbarui…" : "Read-only"}</span>
       </div>
-      <p className="text-sm text-zinc-500">
-        Ringkasan kesehatan proyek. Klik kartu atau batang chart untuk membuka register terfilter.
-      </p>
 
       {/* One filter row above everything it scopes — never per-chart filters. */}
       <div className="mt-5 flex flex-wrap items-end gap-x-6 gap-y-3 rounded-2xl border border-zinc-200 bg-white p-4">

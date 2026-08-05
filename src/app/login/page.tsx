@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { z } from "zod";
 import { useAuth } from "@/lib/auth-context";
@@ -67,8 +68,8 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-zinc-50 px-4">
       <div className="w-full max-w-md">
         <div className="mb-8 text-center">
-          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-zinc-900 text-lg font-bold text-white">
-            CH
+          <div className="mx-auto mb-3 flex h-16 w-16 items-center justify-center overflow-hidden rounded-xl">
+            <Image src="/logo.png" alt="ClashHub logo" width={64} height={64} className="h-full w-full object-contain" />
           </div>
           <h1 className="text-2xl font-semibold text-zinc-900">ClashHub</h1>
           <p className="mt-1 text-sm text-zinc-500">

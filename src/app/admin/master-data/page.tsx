@@ -1,10 +1,170 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRequireAdmin } from "@/lib/use-require-admin";
 import { useData } from "@/lib/data-context";
+import { copyMasterDataTemplate, listProjects } from "@/lib/api/import";
+import { ApiError } from "@/lib/api/client";
+import type { ApiCopyTemplateResult, ApiProject } from "@/lib/api/types";
 
 type Tab = "disiplin" | "zona" | "prioritas" | "status";
+
+/**
+ * Sprint 9's "template master data antar project" deliverable. ClashHub is
+ * single-project today (no create/switch-project UI exists), so in practice
+ * the source dropdown is often empty — the dialog says so plainly rather
+ * than pretending. The endpoint itself (POST /master-data/templates/copy)
+ * works for any two existing projects and is unit-tested independently.
+ */
+function CopyTemplateDialog({
+  currentProjectId,
+  onClose,
+  onCopied,
+}: {
+  currentProjectId: string;
+  onClose: () => void;
+  onCopied: () => void;
+}) {
+  const [projects, setProjects] = useState<ApiProject[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [fromProjectId, setFromProjectId] = useState("");
+  const [includeDisciplines, setIncludeDisciplines] = useState(true);
+  const [includeZones, setIncludeZones] = useState(true);
+  const [isCopying, setIsCopying] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const [result, setResult] = useState<ApiCopyTemplateResult | null>(null);
+
+  useEffect(() => {
+    listProjects()
+      .then((all) => {
+        setProjects(all);
+        const firstOther = all.find((p) => p.id !== currentProjectId);
+        if (firstOther) setFromProjectId(firstOther.id);
+      })
+      .catch(() => setLoadError("Gagal memuat daftar proyek."));
+  }, [currentProjectId]);
+
+  const otherProjects = (projects ?? []).filter((p) => p.id !== currentProjectId);
+
+  async function handleCopy() {
+    if (!fromProjectId) return;
+    const include: ("disciplines" | "zones")[] = [
+      ...(includeDisciplines ? (["disciplines"] as const) : []),
+      ...(includeZones ? (["zones"] as const) : []),
+    ];
+    if (include.length === 0) return;
+
+    setIsCopying(true);
+    setCopyError(null);
+    try {
+      const copyResult = await copyMasterDataTemplate({
+        fromProjectId,
+        toProjectId: currentProjectId,
+        include,
+      });
+      setResult(copyResult);
+      onCopied();
+    } catch (error) {
+      setCopyError(error instanceof ApiError ? error.message : "Gagal menyalin master data.");
+    } finally {
+      setIsCopying(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="w-full max-w-md rounded-2xl bg-white p-5 text-zinc-900 shadow-lg">
+        <h2 className="text-base font-semibold">Salin master data dari proyek lain</h2>
+        <p className="mt-1 text-sm text-zinc-500">
+          Menyalin disiplin/zona aktif dari proyek sumber ke proyek ini. Baris yang sudah ada (kode/nama
+          sama) dilewati — aman dijalankan berulang.
+        </p>
+
+        {loadError && (
+          <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{loadError}</p>
+        )}
+
+        {result ? (
+          <div className="mt-4 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+            Disalin: {result.copied.disciplines} disiplin, {result.copied.zones} zona. Dilewati (sudah
+            ada): {result.skipped.disciplines} disiplin, {result.skipped.zones} zona.
+          </div>
+        ) : (
+          <>
+            {projects && otherProjects.length === 0 ? (
+              <p className="mt-4 text-sm text-zinc-500">Belum ada proyek lain untuk disalin datanya.</p>
+            ) : (
+              <div className="mt-4 space-y-3">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-zinc-600">Dari proyek</label>
+                  <select
+                    value={fromProjectId}
+                    onChange={(e) => setFromProjectId(e.target.value)}
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-zinc-300"
+                  >
+                    <option value="">-- pilih proyek sumber --</option>
+                    {otherProjects.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex gap-4 text-sm text-zinc-700">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={includeDisciplines}
+                      onChange={(e) => setIncludeDisciplines(e.target.checked)}
+                      className="h-4 w-4 rounded border-zinc-300"
+                    />
+                    Disiplin
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={includeZones}
+                      onChange={(e) => setIncludeZones(e.target.checked)}
+                      className="h-4 w-4 rounded border-zinc-300"
+                    />
+                    Zona
+                  </label>
+                </div>
+              </div>
+            )}
+            {copyError && (
+              <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{copyError}</p>
+            )}
+          </>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+          >
+            {result ? "Tutup" : "Batal"}
+          </button>
+          {!result && (
+            <button
+              type="button"
+              onClick={handleCopy}
+              disabled={isCopying || !fromProjectId || (!includeDisciplines && !includeZones)}
+              className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800 disabled:opacity-40"
+            >
+              {isCopying ? "Menyalin…" : "Salin"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ActiveBadge({ active }: { active: boolean }) {
   return (
@@ -23,6 +183,7 @@ function ActiveBadge({ active }: { active: boolean }) {
 export default function AdminMasterDataPage() {
   const { user, isLoading } = useRequireAdmin();
   const {
+    project,
     disciplines,
     zones,
     priorities,
@@ -37,9 +198,11 @@ export default function AdminMasterDataPage() {
     updatePriority,
     togglePriorityActive,
     updateStatus,
+    reloadMasterData,
   } = useData();
 
   const [tab, setTab] = useState<Tab>("disiplin");
+  const [showCopyDialog, setShowCopyDialog] = useState(false);
 
   const [newDiscKode, setNewDiscKode] = useState("");
   const [newDiscNama, setNewDiscNama] = useState("");
@@ -54,10 +217,29 @@ export default function AdminMasterDataPage() {
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-8">
-      <h1 className="text-xl font-semibold text-zinc-900">Master Data</h1>
-      <p className="mt-1 text-sm text-zinc-500">
-        Kelola disiplin, zona, prioritas, dan status yang dipakai di seluruh clash register. (US-F1)
-      </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold text-zinc-900">Master Data</h1>
+          <p className="mt-1 text-sm text-zinc-500">
+            Kelola disiplin, zona, prioritas, dan status yang dipakai di seluruh clash register. (US-F1)
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowCopyDialog(true)}
+          className="shrink-0 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
+        >
+          Salin dari proyek lain
+        </button>
+      </div>
+
+      {showCopyDialog && (
+        <CopyTemplateDialog
+          currentProjectId={project.id}
+          onClose={() => setShowCopyDialog(false)}
+          onCopied={() => void reloadMasterData()}
+        />
+      )}
 
       <div className="mt-6 flex gap-2 border-b border-zinc-200">
         {(

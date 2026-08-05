@@ -1,0 +1,16 @@
+node_modules
+.next
+out
+build
+coverage
+apps
+.git
+.claude
+.env*
+!.env.example
+*.tsbuildinfo
+npm-debug.log*
+README.md
+HANDOFF.md
+ClashHub_*.md
+ClashHub_PRD.docx

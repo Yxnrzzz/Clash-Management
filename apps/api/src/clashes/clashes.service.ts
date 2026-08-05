@@ -2,14 +2,16 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AuthUser } from '../auth/auth.types';
 import {
   BulkUpdateClashDto,
-  BulkUpdatePatchDto,
   CreateClashDto,
   CreateCommentDto,
   DashboardMetricsQueryDto,
@@ -60,6 +62,11 @@ function addDays(date: Date, days: number): Date {
   return d;
 }
 
+/** Thrown by createClashRecord() when the row's externalId already exists in
+ * the project — distinct from a plain retryable uniqueCode race so callers
+ * (ImportProcessor) can treat it as a dedup skip rather than a hard failure. */
+export class DuplicateExternalIdError extends Error {}
+
 /**
  * Mirrors the RBAC rules the frontend already enforces for UX
  * (src/lib/lookup.ts canEditClash, src/lib/use-master-data.ts
@@ -67,7 +74,13 @@ function addDays(date: Date, days: number): Date {
  */
 @Injectable()
 export class ClashesService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(ClashesService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storage: StorageService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   private async currentProject() {
     const project = await this.prisma.project.findFirst({ orderBy: { createdAt: 'asc' } });
@@ -286,12 +299,46 @@ export class ClashesService {
     const clash = await this.prisma.clash.findUnique({ where: { id } });
     if (!clash) throw new NotFoundException('Clash tidak ditemukan.');
 
-    const [comments, auditLogs] = await Promise.all([
+    const [comments, auditLogs, attachments] = await Promise.all([
       this.prisma.comment.findMany({ where: { clashId: id }, orderBy: { createdAt: 'asc' } }),
       this.prisma.auditLog.findMany({ where: { clashId: id }, orderBy: { createdAt: 'desc' } }),
+      this.prisma.attachment.findMany({ where: { clashId: id }, orderBy: { createdAt: 'asc' } }),
     ]);
 
-    return { ...clash, comments, auditLogs };
+    return { ...clash, comments, auditLogs, attachments };
+  }
+
+  // --- Attachments ---------------------------------------------------------------
+
+  async addAttachments(clashId: string, files: Express.Multer.File[], user: AuthUser) {
+    const clash = await this.prisma.clash.findUnique({ where: { id: clashId } });
+    if (!clash) throw new NotFoundException('Clash tidak ditemukan.');
+
+    const created = [];
+    for (const file of files) {
+      const { key } = await this.storage.save(file.buffer, clash.id, file.originalname);
+      created.push(
+        await this.prisma.attachment.create({
+          data: {
+            clashId: clash.id,
+            fileName: file.originalname,
+            fileUrl: key,
+            fileType: file.mimetype,
+            sizeBytes: file.size,
+            uploadedById: user.id,
+          },
+        }),
+      );
+    }
+    return created;
+  }
+
+  async getAttachmentForDownload(clashId: string, attachmentId: string) {
+    const attachment = await this.prisma.attachment.findUnique({ where: { id: attachmentId } });
+    if (!attachment || attachment.clashId !== clashId) {
+      throw new NotFoundException('Lampiran tidak ditemukan.');
+    }
+    return { attachment, stream: this.storage.readStream(attachment.fileUrl) };
   }
 
   // --- Create ------------------------------------------------------------------
@@ -315,43 +362,87 @@ export class ClashesService {
     if (!priority) throw new BadRequestException('Prioritas tidak valid.');
     if (!openStatus) throw new BadRequestException('Belum ada status yang dikonfigurasi.');
 
-    const nowIso = new Date();
+    return this.createClashRecord({
+      project,
+      discipline,
+      zoneId: zone.id,
+      priorityId: priority.id,
+      statusId: openStatus.id,
+      reporterId: user.id,
+      title: dto.title,
+      description: dto.description,
+      dueDate: dto.dueDate ? new Date(dto.dueDate) : null,
+    });
+  }
 
-    // The unique code embeds a per-discipline sequence number. Two concurrent
-    // creates for the same discipline can race for the same number, so retry
-    // once on the unique-constraint violation with a freshly counted value.
+  /**
+   * Shared row-creation path for both the single-clash create() above and
+   * ImportProcessor's per-row commit. Callers are responsible for resolving
+   * and validating discipline/zone/priority/status first — this method only
+   * owns generating the unique code and writing the Clash + AuditLog pair.
+   *
+   * The unique code embeds a per-discipline sequence number. Two concurrent
+   * creates for the same discipline can race for the same number, so retry
+   * once on a uniqueCode collision with a freshly counted value. A collision
+   * on (projectId, externalId) is a different situation — it means this
+   * exact import row already exists — so it's surfaced as
+   * DuplicateExternalIdError instead of retried.
+   */
+  async createClashRecord(input: {
+    project: { id: string; code: string };
+    discipline: { id: string; code: string };
+    zoneId: string;
+    priorityId: string;
+    statusId: string;
+    reporterId: string;
+    title: string;
+    description: string;
+    dueDate: Date | null;
+    externalId?: string | null;
+    auditAction?: string;
+  }) {
+    const nowIso = new Date();
+    const auditAction = input.auditAction ?? 'created';
+
     for (let attempt = 0; attempt < 2; attempt++) {
-      const count = await this.prisma.clash.count({ where: { disciplineId: discipline.id } });
-      const uniqueCode = `${project.code}-${discipline.code}-${String(count + 1).padStart(4, '0')}`;
+      const count = await this.prisma.clash.count({ where: { disciplineId: input.discipline.id } });
+      const uniqueCode = `${input.project.code}-${input.discipline.code}-${String(count + 1).padStart(4, '0')}`;
 
       try {
         return await this.prisma.$transaction(async (tx) => {
           const clash = await tx.clash.create({
             data: {
               uniqueCode,
-              projectId: project.id,
-              title: dto.title.trim(),
-              description: dto.description.trim(),
-              disciplineId: discipline.id,
-              zoneId: zone.id,
-              statusId: openStatus.id,
-              priorityId: priority.id,
-              reporterId: user.id,
-              dueDate: dto.dueDate ? new Date(dto.dueDate) : null,
+              projectId: input.project.id,
+              title: input.title.trim(),
+              description: input.description.trim(),
+              disciplineId: input.discipline.id,
+              zoneId: input.zoneId,
+              statusId: input.statusId,
+              priorityId: input.priorityId,
+              reporterId: input.reporterId,
+              dueDate: input.dueDate,
+              externalId: input.externalId ?? null,
             },
           });
 
           await tx.auditLog.create({
-            data: { clashId: clash.id, actorId: user.id, action: 'created', createdAt: nowIso },
+            data: { clashId: clash.id, actorId: input.reporterId, action: auditAction, createdAt: nowIso },
           });
 
           return clash;
         });
       } catch (error) {
-        const isUniqueClash =
-          error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
-        if (!isUniqueClash || attempt === 1) throw error;
-        // fall through and retry with a recomputed count
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          const target = Array.isArray(error.meta?.target) ? (error.meta.target as string[]) : [];
+          if (target.includes('externalId')) {
+            throw new DuplicateExternalIdError(
+              `External id "${input.externalId}" sudah dipakai di proyek ini.`,
+            );
+          }
+          if (attempt === 0) continue; // uniqueCode race — retry with a recomputed count
+        }
+        throw error;
       }
     }
     throw new BadRequestException('Gagal membuat kode unik clash, coba lagi.');
@@ -474,6 +565,7 @@ export class ClashesService {
       statusId: string;
       priorityId: string;
       assigneeId: string | null;
+      reporterId: string;
       dueDate: Date | null;
       closedAt: Date | null;
     },
@@ -541,11 +633,50 @@ export class ClashesService {
 
     if (auditRows.length === 0) return null;
 
-    return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.clash.update({ where: { id: clash.id }, data });
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.clash.update({ where: { id: clash.id }, data });
       await tx.auditLog.createMany({ data: auditRows });
-      return updated;
+      return result;
     });
+
+    this.publishNotifications(clash, auditRows, actorId, data.assigneeId as string | null | undefined);
+
+    return updated;
+  }
+
+  /**
+   * Fire-and-forget: a notification-queue hiccup (e.g. Redis unreachable)
+   * must never fail the clash update itself, so failures are logged, not
+   * thrown. Called after the transaction commits, so it only fires for
+   * changes that actually landed.
+   */
+  private publishNotifications(
+    clash: { id: string; assigneeId: string | null; reporterId: string },
+    auditRows: Prisma.AuditLogCreateManyInput[],
+    actorId: string,
+    newAssigneeId: string | null | undefined,
+  ): void {
+    for (const row of auditRows) {
+      if (row.field === 'assigneeId' && newAssigneeId) {
+        this.notifications
+          .enqueueAssigned(clash.id, newAssigneeId)
+          .catch((error: Error) => this.logger.warn(`Gagal enqueue notifikasi assigned: ${error.message}`));
+      }
+
+      if (row.field === 'statusId') {
+        const currentAssigneeId = newAssigneeId !== undefined ? newAssigneeId : clash.assigneeId;
+        const recipients = [...new Set([currentAssigneeId, clash.reporterId])].filter(
+          (id): id is string => Boolean(id) && id !== actorId,
+        );
+        if (recipients.length > 0) {
+          this.notifications
+            .enqueueStatusChange(clash.id, recipients, String(row.oldValue), String(row.newValue))
+            .catch((error: Error) =>
+              this.logger.warn(`Gagal enqueue notifikasi status_change: ${error.message}`),
+            );
+        }
+      }
+    }
   }
 
   private sameValue(field: PatchableField, oldValue: PatchValue, newValue: PatchValue): boolean {

@@ -1,4 +1,4 @@
-# ClashHub API — Sprint 1 (Auth, RBAC & Administrasi) + ClashesModule (+ server-side list/metrics)
+# ClashHub API — Sprint 0-9 (fondasi, auth/RBAC, clash lifecycle, notifikasi async, import CSV/XML)
 
 Backend NestJS untuk ClashHub. PostgreSQL & Redis dijalankan via Docker Compose, skema dikelola oleh Prisma ORM.
 
@@ -6,10 +6,12 @@ Backend NestJS untuk ClashHub. PostgreSQL & Redis dijalankan via Docker Compose,
 
 - NestJS (Node.js + TypeScript)
 - PostgreSQL 16 (Docker)
-- Redis 7 (Docker, placeholder untuk caching/queue — belum dipakai)
+- Redis 7 (Docker) + BullMQ — antrean notifikasi async (`notifications`) dan job impor (`import`)
+- MailHog (Docker) — kotak masuk email dev, UI di `http://localhost:8025`
 - Prisma ORM
 - JWT (`@nestjs/jwt` + passport-jwt) & argon2 (`@node-rs/argon2`)
 - class-validator & class-transformer
+- fast-xml-parser — parsing XML impor (Navisworks/Solibri)
 
 ## Menjalankan
 
@@ -51,7 +53,7 @@ Server berjalan di `http://localhost:3001` dengan prefix `/api` (port dikonfigur
 npm test
 ```
 
-Mencakup `RolesGuard` (izin/tolak per peran), `AuthService` (login benar/salah/akun nonaktif, isi payload token), dan `ClashesService` (RBAC per-field, transisi status, `closedAt`, audit log, format `uniqueCode`, filter/sort/pagination di `list()`, agregasi di `metrics()`) — 29 test total.
+Mencakup `RolesGuard` (izin/tolak per peran), `AuthService` (login benar/salah/akun nonaktif, isi payload token), `ClashesService` (RBAC per-field, transisi status, `closedAt`, audit log, format `uniqueCode`, filter/sort/pagination di `list()`, agregasi di `metrics()`), `NotificationsProcessor`/`OverdueScannerService`/`NotificationPreferenceService`, `ImportProcessor`/`ImportService`/parser CSV & XML, dan `MasterDataService.copyTemplate` — 79 test total.
 
 ## Environment
 
@@ -89,18 +91,27 @@ JWT_REFRESH_TTL="7d"
 | PATCH | `/api/users/:id` | Admin |
 | PATCH | `/api/users/:id/active` | Admin |
 | GET | `/api/projects/current` | semua yang login |
+| GET | `/api/projects` | Admin (daftar semua proyek — dipakai dialog "salin template" di master data) |
 | PATCH | `/api/projects/:id` | Admin |
 | GET | `/api/master-data/disciplines` \| `zones` \| `statuses` \| `priorities` | semua yang login |
 | POST | `/api/master-data/disciplines` \| `zones` \| `priorities` | Admin |
 | PATCH | `/api/master-data/disciplines/:id` \| `zones/:id` \| `priorities/:id` \| `statuses/:id` | Admin |
 | PATCH | `/api/master-data/{disciplines,zones,priorities}/:id/active` | Admin |
+| POST | `/api/master-data/templates/copy` | Admin (salin disiplin/zona aktif dari satu proyek ke proyek lain, idempoten — lihat di bawah) |
 | GET | `/api/clashes` | semua yang login (filter/sort/pagination server-side — lihat di bawah) |
 | GET | `/api/clashes/metrics` | semua yang login (agregasi dashboard — KPI, tren mingguan, sebaran) |
-| GET | `/api/clashes/:id` | semua yang login (clash + komentar + audit log) |
+| GET | `/api/clashes/:id` | semua yang login (clash + komentar + audit log + lampiran) |
 | POST | `/api/clashes` | Engineer, Coordinator, Admin |
 | PATCH | `/api/clashes/:id` | Engineer (item sendiri, status maju 1 langkah saja, tidak boleh menutup), Coordinator/Admin (penuh) |
 | POST | `/api/clashes/bulk` | Coordinator, Admin |
 | POST | `/api/clashes/:id/comments` | Engineer, Coordinator, Admin |
+| POST | `/api/clashes/:id/attachments` | Engineer, Coordinator, Admin (multipart, maks 10 file, 10 MB/file, gambar atau PDF) |
+| GET | `/api/clashes/:clashId/attachments/:attachmentId/download` | semua yang login |
+| GET | `/api/notification-preferences/me` | semua yang login (di-scope ke `@CurrentUser()`, bukan parameter caller) |
+| PATCH | `/api/notification-preferences/me` | semua yang login |
+| POST | `/api/import/preview` | Coordinator, Admin (multipart, maks 10 MB, CSV atau XML — lihat di bawah) |
+| POST | `/api/import/commit` | Coordinator, Admin (`autoCreateMasterData` hanya dihormati untuk Admin) |
+| GET | `/api/import/jobs/:id` | Coordinator, Admin (di-scope ke pembuat job atau Admin) |
 
 `PATCH /api/clashes/:id` menerima subset `{ statusId, priorityId, assigneeId, dueDate }`. Aturan siapa boleh mengubah field mana ditegakkan di `ClashesService` (`assertCanEdit`, `buildAllowedPatch`), bukan cuma `@Roles()` — lihat `src/clashes/clashes.service.ts`. Setiap field yang benar-benar berubah menulis satu baris `AuditLog`, dengan `oldValue`/`newValue` sudah diterjemahkan ke nama (bukan id mentah). `uniqueCode` pada `POST /api/clashes` dibuat server-side dalam transaksi, format `{kode-proyek}-{kode-disiplin}-{urutan 4 digit}`.
 
@@ -115,6 +126,56 @@ Semua opsional: `q` (cari di kode/judul/deskripsi), `disc`/`stat`/`prio`/`zone`/
 Status **tidak** bisa ditambah atau dihapus — hanya label dan `isClosedState` yang bisa diubah. Alasannya `allowedStatusTransitions()` di frontend bergantung pada rantai empat tahap yang tetap (`sequence`). Server juga menolak permintaan yang membuat tidak ada satu pun status penutup tersisa.
 
 Disiplin, zona, dan prioritas memakai **soft-delete** lewat `isActive`, bukan hapus permanen, supaya clash lama yang mereferensikan id tersebut tidak menjadi orphan.
+
+## Impor massal (CSV/XML)
+
+Alurnya: `POST /import/preview` (upload) → wizard petakan kolom → `POST /import/commit` (enqueue) → poll `GET /import/jobs/:id` sampai `status` jadi `DONE`/`FAILED`. Setiap baris diproses dan ditulis dalam **transaksi terpisah** (`ClashesService.createClashRecord`, direuse dari `POST /clashes`) lewat `ImportProcessor` (BullMQ, antrean `import`) — satu baris gagal tidak membatalkan baris lain. Baris yang berhasil dibuat sebagai `Clash` berstatus Open dengan `AuditLog.action = "imported"` (beda dari `"created"` yang dipakai jalur `POST /clashes` biasa).
+
+- **Dedup**: kalau mapping menyertakan kolom `externalId`, baris dengan `(projectId, externalId)` yang sudah ada di-skip (dihitung di `skippedRows`, bukan `failedRows`) — aman menjalankan file yang sama dua kali. Constraint unique di database (`Clash_projectId_externalId_key`) jadi penjaga akhir kalau ada race antar job; kena itu, baris dilaporkan skip juga, bukan error (lihat `DuplicateExternalIdError` di `clashes.service.ts`).
+- **Auto-create master data**: `commit.autoCreateMasterData: true` hanya dihormati untuk Admin (403 untuk peran lain). Kalau aktif, disiplin/zona/prioritas dari file yang tidak dikenal dibuat otomatis (disiplin: `code` = nama kolom di-uppercase; zona: `level` default `"-"`; prioritas: `weight` = bobot tertinggi + 1) alih-alih membuat barisnya gagal.
+- **Format terdeteksi** dari ekstensi file (`.csv` atau `.xml`), bukan sniffing isi.
+
+### Contoh CSV
+
+```csv
+judul,disiplin,zona,prioritas,deskripsi,due_date,external_id
+Bentrok pipa AC dengan balok,MEP,Lantai 2 Zona A,High,Ditemukan saat koordinasi model minggu ini,2026-09-10,NW-00231
+Dinding partisi menutup shaft,ARS,Lantai 1 Zona B,Medium,Perlu revisi shop drawing arsitektur,,NW-00245
+```
+
+Nama kolom bebas — wizard memetakan kolom apa pun ke field clash lewat dropdown; hanya isi mapping (`title`, `disciplineCode`, `zoneName`, `priorityName`, `description` wajib; `dueDate`, `externalId` opsional) yang dikirim ke `/import/commit`.
+
+### Contoh XML (Navisworks)
+
+```xml
+<exchange>
+  <batchtest>
+    <clashtests>
+      <clashtest>
+        <clashresults>
+          <clashresult name="Bentrok pipa AC dengan balok" discipline="MEP" zone="Lantai 2 Zona A" priority="High" description="Ditemukan saat koordinasi model minggu ini" duedate="2026-09-10" externalid="NW-00231"/>
+          <clashresult name="Dinding partisi menutup shaft" discipline="ARS" zone="Lantai 1 Zona B" priority="Medium" description="Perlu revisi shop drawing arsitektur" externalid="NW-00245"/>
+        </clashresults>
+      </clashtest>
+    </clashtests>
+  </batchtest>
+</exchange>
+```
+
+### Contoh XML (Solibri)
+
+```xml
+<issues>
+  <issue title="Bentrok pipa AC dengan balok" description="Ditemukan saat koordinasi" discipline="MEP" zone="Lantai 2 Zona A"/>
+  <issue title="Dinding partisi menutup shaft" description="Perlu revisi shop drawing" discipline="ARS" zone="Lantai 1 Zona B"/>
+</issues>
+```
+
+Kedua bentuk XML di-flatten jadi baris berdasarkan atribut elemen (`<clashresult>`/`<issue>`) — lihat `src/import/parsers/xml.parser.ts`. Kolom hasil deteksi = union nama atribut di semua baris (urutan first-seen); atribut yang tidak ada di satu baris jadi string kosong.
+
+## Template master data antar proyek
+
+`POST /master-data/templates/copy` `{ fromProjectId, toProjectId, include: ("disciplines"|"zones")[] }` (Admin). Menyalin baris **aktif** dari proyek sumber; baris yang sudah ada di tujuan (match `code` untuk disiplin, `name`+`level` untuk zona, case-insensitive) di-skip — idempoten, aman dijalankan berulang. `Priority`/`Status` tidak punya `projectId` (global), jadi tidak pernah ikut disalin. ClashHub saat ini single-project (tidak ada endpoint create/switch-project), jadi endpoint ini baru berguna praktis kalau proyek kedua sudah ada di database — logikanya sendiri sudah diuji independen di `master-data.service.spec.ts`.
 
 ## Akun demo (hasil seed)
 

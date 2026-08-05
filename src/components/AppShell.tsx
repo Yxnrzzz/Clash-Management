@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
@@ -40,8 +41,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-screen w-full bg-zinc-50 text-zinc-900">
       <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-200 bg-white">
         <div className="flex h-16 items-center gap-2 border-b border-zinc-200 px-5">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-zinc-900 text-sm font-bold text-white">
-            CH
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg">
+            <Image src="/logo.png" alt="ClashHub logo" width={36} height={36} className="h-full w-full object-contain" />
           </div>
           <div>
             <p className="text-sm font-semibold leading-none">ClashHub</p>

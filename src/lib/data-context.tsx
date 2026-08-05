@@ -9,17 +9,20 @@ import {
   useRef,
   useState,
 } from "react";
-import { apiGet, apiPatch, apiPost } from "./api/client";
+import { apiGet, apiPatch, apiPost, apiUpload } from "./api/client";
 import {
   disciplinePayload,
   newClashPayload,
+  notificationPreferencePayload,
   priorityPayload,
   projectPayload,
   statusPayload,
+  toAttachment,
   toAuditLog,
   toClash,
   toComment,
   toDiscipline,
+  toNotificationPreference,
   toPriority,
   toProject,
   toStatus,
@@ -30,10 +33,12 @@ import {
   type ClashFieldPatch,
 } from "./api/mappers";
 import type {
+  ApiAttachment,
   ApiClash,
   ApiClashDetail,
   ApiComment,
   ApiDiscipline,
+  ApiNotificationPreference,
   ApiPriority,
   ApiProject,
   ApiStatus,
@@ -56,16 +61,18 @@ import type {
 } from "./types";
 
 /**
- * Post-hybrid phase (Sprint 2-4): master data — project, users, disciplines,
- * zones, statuses, priorities — plus clashes, comments and audit logs are all
- * served by the NestJS API. Only attachments and notification preferences
- * still live in localStorage: attachments because object storage doesn't
- * exist yet (deferred, see HANDOFF.md), notification preferences because the
- * notifications module hasn't been built.
+ * Nothing here is client-only anymore. Project, users, disciplines, zones,
+ * statuses, priorities, clashes, comments, audit logs, attachments, and
+ * notification preferences are all served by the NestJS API — the last of
+ * these (notification preferences) moved off localStorage once the
+ * notifications module shipped (see apps/api/src/notifications/). Attachment
+ * files themselves live on disk behind the API (see apps/api/src/storage/);
+ * the client never sees a filesystem path, only ids to upload/download
+ * through.
  *
- * Comments and audit logs are loaded lazily per clash via loadClashDetail()
- * rather than in the initial batch fetch — the list view never needs them,
- * only the detail page does.
+ * Comments, audit logs, and attachments are loaded lazily per clash via
+ * loadClashDetail() rather than in the initial batch fetch — the list view
+ * never needs them, only the detail page does.
  *
  * Clashes are NOT bulk-loaded here (see clashesById below) — Register,
  * Dashboard, "Clash Saya", and the detail page each fetch exactly what they
@@ -74,20 +81,12 @@ import type {
  * every login (see HANDOFF.md §12).
  */
 
-const STORAGE_KEY = "clashhub-data-v4";
-
 /** How long a keystroke-driven edit waits before it is PATCHed to the server. */
 const PATCH_DEBOUNCE_MS = 500;
 
 const EMPTY_PROJECT: Project = { id: "", nama: "", kode: "" };
 
-/** The half still persisted in the browser (no backend module yet). */
-interface LocalState {
-  attachments: Attachment[];
-  notificationPreferences: NotificationPreference[];
-}
-
-/** The half that comes from the API. */
+/** Everything comes from the API — this is the whole client-side state. */
 interface MasterState {
   project: Project;
   users: User[];
@@ -105,18 +104,16 @@ interface MasterState {
   /** Populated lazily, clash by clash, via loadClashDetail(). */
   comments: Comment[];
   auditLogs: AuditLogEntry[];
+  attachments: Attachment[];
+  notificationPreference: NotificationPreference | null;
 }
 
 type ClashEditableField = "assigneeId" | "priorityId" | "dueDate" | "statusId";
 
-interface DataContextValue extends LocalState, MasterState {
+interface DataContextValue extends MasterState {
   isLoading: boolean;
   /** Last failed server write, if any — the optimistic edit has been rolled back. */
   syncError: string | null;
-  /** Object URLs for attachments uploaded THIS session — never persisted
-   * (blob: URLs and File objects cannot survive a reload without a real
-   * backend). Attachments created in a previous session show no preview. */
-  attachmentPreviewUrls: Record<string, string>;
 
   /** Called by AuthProvider once a session is established (or restored). */
   reloadMasterData: () => Promise<void>;
@@ -159,17 +156,12 @@ interface DataContextValue extends LocalState, MasterState {
 
   updateStatus: (id: string, patch: Partial<Pick<Status, "nama" | "isClosedState">>) => void;
 
-  setNotificationPreference: (
-    userId: string,
+  updateNotificationPreference: (
     patch: Partial<Omit<NotificationPreference, "userId">>
-  ) => void;
+  ) => Promise<void>;
 }
 
 const DataContext = createContext<DataContextValue | null>(null);
-
-function loadInitialLocal(): LocalState {
-  return { attachments: [], notificationPreferences: [] };
-}
 
 /** Merges `incoming` into `existing` by id, incoming wins on conflict. */
 function mergeById<T extends { id: string }>(existing: T[], incoming: T[]): T[] {
@@ -183,52 +175,24 @@ function messageOf(error: unknown): string {
 }
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
-  const [local, setLocal] = useState<LocalState | null>(null);
   const [master, setMaster] = useState<MasterState | null>(null);
   const [masterResolved, setMasterResolved] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
-  const [attachmentPreviewUrls, setAttachmentPreviewUrls] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      try {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time hydration from localStorage, client-only
-        setLocal(JSON.parse(raw) as LocalState);
-        return;
-      } catch {
-        // fall through to seed
-      }
-    }
-    setLocal(loadInitialLocal());
-  }, []);
-
-  useEffect(() => {
-    if (local) {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(local));
-    }
-  }, [local]);
-
-  // Revoke object URLs on unmount so the browser can reclaim the memory.
-  useEffect(() => {
-    return () => {
-      Object.values(attachmentPreviewUrls).forEach((url) => URL.revokeObjectURL(url));
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // --- Master data from the API --------------------------------------------
 
   const reloadMasterData = useCallback(async () => {
     try {
-      const [project, users, disciplines, zones, statuses, priorities] = await Promise.all([
-        apiGet<ApiProject>("/projects/current"),
-        apiGet<ApiUser[]>("/users"),
-        apiGet<ApiDiscipline[]>("/master-data/disciplines"),
-        apiGet<ApiZone[]>("/master-data/zones"),
-        apiGet<ApiStatus[]>("/master-data/statuses"),
-        apiGet<ApiPriority[]>("/master-data/priorities"),
-      ]);
+      const [project, users, disciplines, zones, statuses, priorities, notificationPreference] =
+        await Promise.all([
+          apiGet<ApiProject>("/projects/current"),
+          apiGet<ApiUser[]>("/users"),
+          apiGet<ApiDiscipline[]>("/master-data/disciplines"),
+          apiGet<ApiZone[]>("/master-data/zones"),
+          apiGet<ApiStatus[]>("/master-data/statuses"),
+          apiGet<ApiPriority[]>("/master-data/priorities"),
+          apiGet<ApiNotificationPreference>("/notification-preferences/me"),
+        ]);
 
       setMaster({
         project: toProject(project),
@@ -240,6 +204,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         clashesById: {},
         comments: [],
         auditLogs: [],
+        attachments: [],
+        notificationPreference: toNotificationPreference(notificationPreference),
       });
       setSyncError(null);
     } catch (error) {
@@ -318,11 +284,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   /**
    * Creates the clash on the server (which assigns uniqueCode, default
    * status, reporterId from the JWT, and writes the "created" audit row),
-   * then attaches whatever files were staged locally. Attachments stay
-   * client-only until object storage exists — see the Attachment type.
+   * then uploads whatever files were staged locally to the same clash.
    */
   const createClash = useCallback(
-    async (input: NewClashInput, reporterId: string): Promise<Clash> => {
+    async (input: NewClashInput, _reporterId: string): Promise<Clash> => {
+      void _reporterId;
       const createdApi = await runWrite(
         () => apiPost<ApiClash>("/clashes", newClashPayload(input)),
         (result) =>
@@ -333,30 +299,18 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       );
       const created = toClash(createdApi);
 
-      const newPreviewUrls: Record<string, string> = {};
-      const nowIso = new Date().toISOString();
-      const newAttachments: Attachment[] = input.attachments.map((a, idx) => {
-        const id = `att-${created.id}-${idx}`;
-        if (a.file) newPreviewUrls[id] = URL.createObjectURL(a.file);
-        return {
-          id,
-          clashId: created.id,
-          namaFile: a.namaFile,
-          tipe: a.tipe,
-          ukuranBytes: a.ukuranBytes,
-          uploadedBy: reporterId,
-          createdAt: nowIso,
-        };
-      });
-
-      if (newAttachments.length > 0) {
-        setLocal((prev) => {
-          const base = prev ?? loadInitialLocal();
-          return { ...base, attachments: [...base.attachments, ...newAttachments] };
-        });
-      }
-      if (Object.keys(newPreviewUrls).length) {
-        setAttachmentPreviewUrls((prev) => ({ ...prev, ...newPreviewUrls }));
+      const files = input.attachments.map((a) => a.file).filter((f): f is File => !!f);
+      if (files.length > 0) {
+        const formData = new FormData();
+        for (const file of files) formData.append("files", file);
+        await runWrite(
+          () => apiUpload<ApiAttachment[]>(`/clashes/${created.id}/attachments`, formData),
+          (createdAttachments) =>
+            patchMaster((prev) => ({
+              ...prev,
+              attachments: mergeById(prev.attachments, createdAttachments.map(toAttachment)),
+            }))
+        );
       }
 
       return created;
@@ -364,18 +318,20 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     [patchMaster, runWrite]
   );
 
-  /** Fetches one clash's comments + audit log and merges them into context. */
+  /** Fetches one clash's comments + audit log + attachments and merges them into context. */
   const loadClashDetail = useCallback(
     async (clashId: string): Promise<void> => {
       try {
         const detail = await apiGet<ApiClashDetail>(`/clashes/${clashId}`);
         const comments = detail.comments.map(toComment);
         const auditLogs = detail.auditLogs.map(toAuditLog);
+        const attachments = detail.attachments.map(toAttachment);
         patchMaster((prev) => ({
           ...prev,
           clashesById: { ...prev.clashesById, [clashId]: toClash(detail) },
           comments: mergeById(prev.comments, comments),
           auditLogs: mergeById(prev.auditLogs, auditLogs),
+          attachments: mergeById(prev.attachments, attachments),
         }));
         setSyncError(null);
       } catch (error) {
@@ -640,25 +596,21 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     [patchMaster, schedulePatch]
   );
 
-  // --- Notification preferences (still local) -------------------------------
+  // --- Notification preferences ----------------------------------------------
 
-  const setNotificationPreference = useCallback(
-    (userId: string, patch: Partial<Omit<NotificationPreference, "userId">>) => {
-      setLocal((prev) => {
-        if (!prev) return prev;
-        const existing = prev.notificationPreferences.find((p) => p.userId === userId);
-        const next: NotificationPreference = existing
-          ? { ...existing, ...patch }
-          : { userId, emailEnabled: true, whatsappEnabled: false, whatsappNumber: "", ...patch };
-        return {
-          ...prev,
-          notificationPreferences: existing
-            ? prev.notificationPreferences.map((p) => (p.userId === userId ? next : p))
-            : [...prev.notificationPreferences, next],
-        };
-      });
+  const updateNotificationPreference = useCallback(
+    async (patch: Partial<Omit<NotificationPreference, "userId">>): Promise<void> => {
+      await runWrite(
+        () =>
+          apiPatch<ApiNotificationPreference>(
+            "/notification-preferences/me",
+            notificationPreferencePayload(patch)
+          ),
+        (updated) =>
+          patchMaster((prev) => ({ ...prev, notificationPreference: toNotificationPreference(updated) }))
+      );
     },
-    []
+    [patchMaster, runWrite]
   );
 
   const value = useMemo<DataContextValue>(
@@ -672,11 +624,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       clashesById: master?.clashesById ?? {},
       comments: master?.comments ?? [],
       auditLogs: master?.auditLogs ?? [],
-      attachments: local?.attachments ?? [],
-      notificationPreferences: local?.notificationPreferences ?? [],
-      isLoading: local === null || !masterResolved,
+      attachments: master?.attachments ?? [],
+      notificationPreference: master?.notificationPreference ?? null,
+      isLoading: !masterResolved,
       syncError,
-      attachmentPreviewUrls,
       reloadMasterData,
       clearMasterData,
       loadClashDetail,
@@ -698,14 +649,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       updatePriority,
       togglePriorityActive,
       updateStatus,
-      setNotificationPreference,
+      updateNotificationPreference,
     }),
     [
-      local,
       master,
       masterResolved,
       syncError,
-      attachmentPreviewUrls,
       reloadMasterData,
       clearMasterData,
       loadClashDetail,
@@ -727,7 +676,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       updatePriority,
       togglePriorityActive,
       updateStatus,
-      setNotificationPreference,
+      updateNotificationPreference,
     ]
   );
 

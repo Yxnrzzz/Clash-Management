@@ -14,6 +14,12 @@ export class ProjectsController {
   }
 
   @Roles(Role.ADMIN)
+  @Get()
+  listAll() {
+    return this.projects.listAll();
+  }
+
+  @Roles(Role.ADMIN)
   @Patch(':id')
   update(@Param('id') id: string, @Body() dto: UpdateProjectDto) {
     return this.projects.update(id, dto);
