@@ -26,15 +26,9 @@ export class UsersService {
       data: { name: dto.name.trim(), email, role: dto.role, passwordHash },
     });
 
-    // Single-project deployment: every new account joins the one project so the
-    // ProjectMemberGuard resolves for them straight away.
-    const project = await this.prisma.project.findFirst({ orderBy: { createdAt: 'asc' } });
-    if (project) {
-      await this.prisma.projectMember.create({
-        data: { projectId: project.id, userId: user.id, projectRole: user.role },
-      });
-    }
-
+    // Multi-project: a new account starts with no project membership at all.
+    // An Admin must assign it to specific projects via
+    // POST /projects/:projectId/members (see ProjectsController).
     return toUserView(user);
   }
 

@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { apiGet, apiPatch, apiPost, apiUpload } from "./api/client";
+import { apiGet, apiPatch, apiPost, apiUpload, setActiveProjectId } from "./api/client";
 import {
   disciplinePayload,
   newClashPayload,
@@ -84,11 +84,20 @@ import type {
 /** How long a keystroke-driven edit waits before it is PATCHed to the server. */
 const PATCH_DEBOUNCE_MS = 500;
 
+/** Remembers the user's pick across reloads — see setActiveProject() below. */
+const ACTIVE_PROJECT_STORAGE_KEY = "clashhub:activeProjectId";
+
 const EMPTY_PROJECT: Project = { id: "", nama: "", kode: "" };
 
 /** Everything comes from the API — this is the whole client-side state. */
 interface MasterState {
+  /** The project currently selected via the switcher — every project-scoped
+   * fetch (disciplines/zones/clashes/import) is implicitly scoped to it via
+   * the X-Project-Id header (see api/client.ts's setActiveProjectId()). */
   project: Project;
+  /** Every project this user is a member of (Admin/Management/Coordinator:
+   * every project) — the switcher's source list. */
+  projects: Project[];
   users: User[];
   disciplines: Discipline[];
   zones: Zone[];
@@ -121,6 +130,9 @@ interface DataContextValue extends MasterState {
   clearMasterData: () => void;
   /** Fetches one clash's comments + audit log and merges them into context. */
   loadClashDetail: (clashId: string) => Promise<void>;
+  /** Switches the active project: persists the choice, updates the
+   * X-Project-Id header, and reloads project-scoped master data. */
+  setActiveProject: (projectId: string) => Promise<void>;
 
   createClash: (input: NewClashInput, reporterId: string) => Promise<Clash>;
   updateClashField: (
@@ -136,6 +148,9 @@ interface DataContextValue extends MasterState {
   ) => Promise<{ updated: number }>;
   addComment: (clashId: string, authorId: string, isi: string) => Promise<void>;
 
+  /** Admin-only — creates the project and switches to it immediately (it
+   * starts with no disciplines/zones/members for the admin to set up next). */
+  createProject: (input: Pick<Project, "nama" | "kode">) => Promise<Project>;
   updateProject: (patch: Partial<Pick<Project, "nama" | "kode">>) => void;
 
   createUser: (input: Pick<User, "nama" | "email" | "peran">) => Promise<User>;
@@ -183,19 +198,39 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const reloadMasterData = useCallback(async () => {
     try {
-      const [project, users, disciplines, zones, statuses, priorities, notificationPreference] =
-        await Promise.all([
-          apiGet<ApiProject>("/projects/current"),
-          apiGet<ApiUser[]>("/users"),
-          apiGet<ApiDiscipline[]>("/master-data/disciplines"),
-          apiGet<ApiZone[]>("/master-data/zones"),
-          apiGet<ApiStatus[]>("/master-data/statuses"),
-          apiGet<ApiPriority[]>("/master-data/priorities"),
-          apiGet<ApiNotificationPreference>("/notification-preferences/me"),
-        ]);
+      // /projects itself is never X-Project-Id-scoped (see ProjectsController),
+      // so this list is safe to fetch before an active project is known — it
+      // IS the source of which project(s) this user may pick.
+      const [projectsApi, users, statuses, priorities, notificationPreference] = await Promise.all([
+        apiGet<ApiProject[]>("/projects"),
+        apiGet<ApiUser[]>("/users"),
+        apiGet<ApiStatus[]>("/master-data/statuses"),
+        apiGet<ApiPriority[]>("/master-data/priorities"),
+        apiGet<ApiNotificationPreference>("/notification-preferences/me"),
+      ]);
+
+      const projects = projectsApi.map(toProject);
+      const storedId =
+        typeof window !== "undefined" ? window.localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) : null;
+      const activeProject = projects.find((p) => p.id === storedId) ?? projects[0] ?? EMPTY_PROJECT;
+
+      setActiveProjectId(activeProject.id || null);
+      if (typeof window !== "undefined" && activeProject.id) {
+        window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, activeProject.id);
+      }
+
+      // Disciplines/zones are per-project; only fetch them once a project is
+      // known (a user with zero project memberships gets neither).
+      const [disciplines, zones] = activeProject.id
+        ? await Promise.all([
+            apiGet<ApiDiscipline[]>("/master-data/disciplines"),
+            apiGet<ApiZone[]>("/master-data/zones"),
+          ])
+        : [[] as ApiDiscipline[], [] as ApiZone[]];
 
       setMaster({
-        project: toProject(project),
+        project: activeProject,
+        projects,
         users: users.map(toUser),
         disciplines: disciplines.map(toDiscipline),
         zones: zones.map(toZone),
@@ -216,6 +251,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const clearMasterData = useCallback(() => {
+    setActiveProjectId(null);
     setMaster(null);
     setMasterResolved(true);
   }, []);
@@ -403,12 +439,81 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   // --- Project --------------------------------------------------------------
 
+  /**
+   * Switches the active project without a full reloadMasterData() — users/
+   * statuses/priorities/notification prefs aren't project-scoped, so only
+   * disciplines/zones need refetching. The on-demand clash caches are
+   * cleared since they belonged to the previous project.
+   */
+  const setActiveProject = useCallback(
+    async (projectId: string): Promise<void> => {
+      const target = master?.projects.find((p) => p.id === projectId);
+      if (!target || target.id === master?.project.id) return;
+
+      setActiveProjectId(target.id);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, target.id);
+      }
+
+      try {
+        const [disciplines, zones] = await Promise.all([
+          apiGet<ApiDiscipline[]>("/master-data/disciplines"),
+          apiGet<ApiZone[]>("/master-data/zones"),
+        ]);
+        patchMaster((prev) => ({
+          ...prev,
+          project: target,
+          disciplines: disciplines.map(toDiscipline),
+          zones: zones.map(toZone),
+          clashesById: {},
+          comments: [],
+          auditLogs: [],
+          attachments: [],
+        }));
+        setSyncError(null);
+      } catch (error) {
+        setSyncError(messageOf(error));
+      }
+    },
+    [master, patchMaster]
+  );
+
+  const createProject = useCallback(
+    (input: Pick<Project, "nama" | "kode">): Promise<Project> =>
+      runWrite(
+        () => apiPost<ApiProject>("/projects", projectPayload(input)),
+        (created) => {
+          const project = toProject(created);
+          setActiveProjectId(project.id);
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, project.id);
+          }
+          patchMaster((prev) => ({
+            ...prev,
+            project,
+            projects: [...prev.projects, project],
+            disciplines: [],
+            zones: [],
+            clashesById: {},
+            comments: [],
+            auditLogs: [],
+            attachments: [],
+          }));
+        }
+      ).then(toProject),
+    [patchMaster, runWrite]
+  );
+
   const updateProject = useCallback(
     (patch: Partial<Pick<Project, "nama" | "kode">>) => {
       let projectId = "";
       patchMaster((prev) => {
         projectId = prev.project.id;
-        return { ...prev, project: { ...prev.project, ...patch } };
+        return {
+          ...prev,
+          project: { ...prev.project, ...patch },
+          projects: prev.projects.map((p) => (p.id === projectId ? { ...p, ...patch } : p)),
+        };
       });
       if (projectId) {
         schedulePatch(`project:${projectId}`, `/projects/${projectId}`, projectPayload(patch));
@@ -616,6 +721,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<DataContextValue>(
     () => ({
       project: master?.project ?? EMPTY_PROJECT,
+      projects: master?.projects ?? [],
       users: master?.users ?? [],
       disciplines: master?.disciplines ?? [],
       zones: master?.zones ?? [],
@@ -631,10 +737,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       reloadMasterData,
       clearMasterData,
       loadClashDetail,
+      setActiveProject,
       createClash,
       updateClashField,
       bulkUpdateClashes,
       addComment,
+      createProject,
       updateProject,
       createUser,
       updateUser,
@@ -658,10 +766,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       reloadMasterData,
       clearMasterData,
       loadClashDetail,
+      setActiveProject,
       createClash,
       updateClashField,
       bulkUpdateClashes,
       addComment,
+      createProject,
       updateProject,
       createUser,
       updateUser,

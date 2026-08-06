@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { canComment, canEditClash, formatBytes, formatDate, formatDateTime, isAdmin } from "./lookup";
-import type { Clash } from "./types";
+import { canComment, canEditClash, formatBytes, formatDate, formatDateTime, isAdmin, isAssignable } from "./lookup";
+import type { Clash, User } from "./types";
+
+function makeUser(overrides: Partial<User> = {}): User {
+  return {
+    id: "u1",
+    nama: "Test User",
+    email: "test@example.com",
+    peran: "Engineer",
+    isActive: true,
+    ...overrides,
+  };
+}
 
 function makeClash(overrides: Partial<Clash> = {}): Clash {
   return {
@@ -96,5 +107,19 @@ describe("isAdmin", () => {
   it("returns true only for Admin", () => {
     expect(isAdmin("Admin")).toBe(true);
     expect(isAdmin("Coordinator")).toBe(false);
+  });
+});
+
+describe("isAssignable", () => {
+  it("allows an active Engineer", () => {
+    expect(isAssignable(makeUser({ peran: "Engineer", isActive: true }))).toBe(true);
+  });
+
+  it("denies an inactive Engineer", () => {
+    expect(isAssignable(makeUser({ peran: "Engineer", isActive: false }))).toBe(false);
+  });
+
+  it.each(["Coordinator", "Management", "Admin"] as const)("denies %s", (peran) => {
+    expect(isAssignable(makeUser({ peran, isActive: true }))).toBe(false);
   });
 });

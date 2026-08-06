@@ -15,6 +15,7 @@ import {
 import { FilesInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import { Role } from '@prisma/client';
+import { ActiveProject } from '../common/decorators/active-project.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { AuthUser } from '../auth/auth.types';
@@ -43,39 +44,52 @@ export class ClashesController {
   constructor(private readonly clashes: ClashesService) {}
 
   @Get()
-  list(@Query() query: ListClashesQueryDto) {
-    return this.clashes.list(query);
+  list(@Query() query: ListClashesQueryDto, @ActiveProject() projectId: string) {
+    return this.clashes.list(query, projectId);
   }
 
   // Must come before @Get(':id') — Nest/Express match routes in declaration
   // order, so a metrics route declared after :id would be swallowed as
   // id="metrics" instead of matching this handler.
   @Get('metrics')
-  metrics(@Query() query: DashboardMetricsQueryDto) {
-    return this.clashes.metrics(query);
+  metrics(@Query() query: DashboardMetricsQueryDto, @ActiveProject() projectId: string) {
+    return this.clashes.metrics(query, projectId);
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.clashes.findDetail(id);
+  findOne(@Param('id') id: string, @ActiveProject() projectId: string) {
+    return this.clashes.findDetail(id, projectId);
   }
 
   @Roles(Role.ENGINEER, Role.COORDINATOR, Role.ADMIN)
   @Post()
-  create(@Body() dto: CreateClashDto, @CurrentUser() user: AuthUser) {
-    return this.clashes.create(dto, user);
+  create(
+    @Body() dto: CreateClashDto,
+    @CurrentUser() user: AuthUser,
+    @ActiveProject() projectId: string,
+  ) {
+    return this.clashes.create(dto, user, projectId);
   }
 
   @Roles(Role.ENGINEER, Role.COORDINATOR, Role.ADMIN)
   @Patch(':id')
-  update(@Param('id') id: string, @Body() dto: UpdateClashDto, @CurrentUser() user: AuthUser) {
-    return this.clashes.update(id, dto, user);
+  update(
+    @Param('id') id: string,
+    @Body() dto: UpdateClashDto,
+    @CurrentUser() user: AuthUser,
+    @ActiveProject() projectId: string,
+  ) {
+    return this.clashes.update(id, dto, user, projectId);
   }
 
   @Roles(Role.COORDINATOR, Role.ADMIN)
   @Post('bulk')
-  bulkUpdate(@Body() dto: BulkUpdateClashDto, @CurrentUser() user: AuthUser) {
-    return this.clashes.bulkUpdate(dto, user);
+  bulkUpdate(
+    @Body() dto: BulkUpdateClashDto,
+    @CurrentUser() user: AuthUser,
+    @ActiveProject() projectId: string,
+  ) {
+    return this.clashes.bulkUpdate(dto, user, projectId);
   }
 
   @Roles(Role.ENGINEER, Role.COORDINATOR, Role.ADMIN)
@@ -84,8 +98,9 @@ export class ClashesController {
     @Param('id') id: string,
     @Body() dto: CreateCommentDto,
     @CurrentUser() user: AuthUser,
+    @ActiveProject() projectId: string,
   ) {
-    return this.clashes.addComment(id, dto, user);
+    return this.clashes.addComment(id, dto, user, projectId);
   }
 
   // Server-side re-validation of type/size/count: the frontend's own checks
@@ -99,24 +114,29 @@ export class ClashesController {
     @Param('id') id: string,
     @UploadedFiles() files: Express.Multer.File[],
     @CurrentUser() user: AuthUser,
+    @ActiveProject() projectId: string,
   ) {
     for (const file of files) {
       if (!ACCEPTED_ATTACHMENT_TYPES.some((t) => file.mimetype.startsWith(t))) {
         throw new BadRequestException('Tipe file harus gambar atau PDF');
       }
     }
-    return this.clashes.addAttachments(id, files, user);
+    return this.clashes.addAttachments(id, files, user, projectId);
   }
 
   @Get(':clashId/attachments/:attachmentId/download')
   async downloadAttachment(
     @Param('clashId') clashId: string,
     @Param('attachmentId') attachmentId: string,
+    @CurrentUser() user: AuthUser,
+    @ActiveProject() projectId: string,
     @Res({ passthrough: true }) res: Response,
   ) {
     const { attachment, stream } = await this.clashes.getAttachmentForDownload(
       clashId,
       attachmentId,
+      user,
+      projectId,
     );
     res.set({
       'Content-Type': attachment.fileType,

@@ -25,6 +25,14 @@ const DEMO_ACCOUNTS = [
   { peran: "Admin", email: "admin@clashhub.dev" },
 ] as const;
 
+// NODE_ENV is set automatically by Next's own tooling (`next dev` →
+// "development", `next build`/`next start` → "production") — no env file to
+// remember to configure. The production Dockerfile inherits that, so this
+// autofill convenience card (and the demo credentials with it) disappears
+// from production builds by construction, without deleting it from source
+// or requiring a new env var someone could forget to set.
+const SHOW_DEMO_ACCOUNTS = process.env.NODE_ENV !== "production";
+
 export default function LoginPage() {
   const { login, user, isLoading } = useAuth();
   const router = useRouter();
@@ -69,12 +77,9 @@ export default function LoginPage() {
       <div className="w-full max-w-md">
         <div className="mb-8 text-center">
           <div className="mx-auto mb-3 flex h-16 w-16 items-center justify-center overflow-hidden rounded-xl">
-            <Image src="/logo.png" alt="ClashHub logo" width={64} height={64} className="h-full w-full object-contain" />
+            <Image src="/logo.png" alt="EPS Workspace logo" width={64} height={64} className="h-full w-full object-contain" />
           </div>
-          <h1 className="text-2xl font-semibold text-zinc-900">ClashHub</h1>
-          <p className="mt-1 text-sm text-zinc-500">
-            Web platform manajemen clash &amp; issue koordinasi BIM
-          </p>
+          <h1 className="text-2xl font-semibold text-zinc-900">EPS Workspace</h1>
         </div>
 
         <form
@@ -131,28 +136,30 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <div className="mt-6 rounded-2xl border border-zinc-200 bg-white p-4 text-xs text-zinc-500">
-          <p className="mb-2 font-medium text-zinc-700">
-            Akun demo (password <span className="font-mono">{DEMO_PASSWORD}</span>):
-          </p>
-          <ul className="space-y-1">
-            {DEMO_ACCOUNTS.map((account) => (
-              <li key={account.email} className="flex items-center justify-between">
-                <span>{account.peran}</span>
-                <button
-                  type="button"
-                  className="rounded bg-zinc-100 px-2 py-0.5 font-mono text-zinc-700 hover:bg-zinc-200"
-                  onClick={() => {
-                    setEmail(account.email);
-                    setPassword(DEMO_PASSWORD);
-                  }}
-                >
-                  {account.email}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
+        {SHOW_DEMO_ACCOUNTS && (
+          <div className="mt-6 rounded-2xl border border-zinc-200 bg-white p-4 text-xs text-zinc-500">
+            <p className="mb-2 font-medium text-zinc-700">
+              Akun demo (password <span className="font-mono">{DEMO_PASSWORD}</span>):
+            </p>
+            <ul className="space-y-1">
+              {DEMO_ACCOUNTS.map((account) => (
+                <li key={account.email} className="flex items-center justify-between">
+                  <span>{account.peran}</span>
+                  <button
+                    type="button"
+                    className="rounded bg-zinc-100 px-2 py-0.5 font-mono text-zinc-700 hover:bg-zinc-200"
+                    onClick={() => {
+                      setEmail(account.email);
+                      setPassword(DEMO_PASSWORD);
+                    }}
+                  >
+                    {account.email}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     </div>
   );

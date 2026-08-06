@@ -25,6 +25,13 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      # Non-blocking: reports findings without failing the build. There are
+      # two known high-severity advisories in this app's dependency tree
+      # today (sharp via next's image optimizer, xlsx/SheetJS) that a hard
+      # gate would trip on permanently — xlsx has no upstream fix at all,
+      # and it's core to the PRD's export feature. See HANDOFF.md §12.
+      - run: npm audit --audit-level=high
+        continue-on-error: true
 
   api:
     name: API (NestJS)
@@ -48,6 +55,24 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      - run: npm audit --audit-level=high
+
+  security:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Runs the open-source gitleaks CLI directly (MIT licensed) rather
+      # than the gitleaks/gitleaks-action wrapper, whose PR-comment feature
+      # requires a paid license for org-owned repos — `detect` itself does
+      # not. Scans full git history, not just the working tree.
+      - name: Scan for committed secrets
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/repo" zricethezav/gitleaks:latest \
+            detect --source=/repo -v --redact
 
   docker:
     name: Docker build

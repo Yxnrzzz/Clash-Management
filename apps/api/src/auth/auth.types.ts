@@ -7,6 +7,12 @@ export interface JwtPayload {
   role: Role;
 }
 
+/** Shape of the signed refresh-token payload — see User.refreshTokenVersion. */
+export interface RefreshPayload {
+  sub: string;
+  ver: number;
+}
+
 /** What JwtStrategy attaches to `request.user`. */
 export interface AuthUser {
   id: string;

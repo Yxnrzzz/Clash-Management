@@ -15,7 +15,7 @@ export class EmailService {
       port: config.get<number>('SMTP_PORT') ?? 1025,
       secure: false,
     });
-    this.from = config.get<string>('SMTP_FROM') ?? 'ClashHub <noreply@clashhub.dev>';
+    this.from = config.get<string>('SMTP_FROM') ?? 'EPS Workspace <noreply@clashhub.dev>';
   }
 
   async sendClashNotification(to: string, subject: string, html: string): Promise<void> {

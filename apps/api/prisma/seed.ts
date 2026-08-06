@@ -19,6 +19,32 @@ const DEMO_PASSWORD = 'demo1234';
 
 const PROJECT = { id: 'proj-1', name: 'Menara Cendana — Tower A', code: 'MCA' };
 
+/**
+ * Second project, kept deliberately small — its only purpose is to give the
+ * multi-project authorization work (ProjectContextGuard, per-project
+ * disciplines/zones/clashes) something real to isolate against in a dev
+ * database, without touching any of proj-1's existing data/ids above.
+ */
+const PROJECT_2 = { id: 'proj-2', name: 'Grha Samudra — Menara B', code: 'GSB' };
+
+const DISCIPLINES_2 = [
+  { id: 'disc2-ars', code: 'ARS', name: 'Arsitektur' },
+  { id: 'disc2-str', code: 'STR', name: 'Struktur' },
+  { id: 'disc2-mep', code: 'MEP', name: 'Mekanikal/Elektrikal/Plumbing' },
+];
+
+const ZONES_2 = [
+  { id: 'zone2-1', name: 'Zona A', level: 'Lantai 1' },
+  { id: 'zone2-2', name: 'Zona Core', level: 'Lantai 2' },
+];
+
+// Only these users are ProjectMembers of proj-2 (unlike proj-1, where every
+// seeded user is a member) — u-eng is deliberately left out so a fresh dev
+// database already has an Engineer confined to just one project to test
+// isolation against. Coordinator/Management/Admin can reach proj-2 anyway
+// via CROSS_PROJECT_ROLES regardless of membership rows.
+const PROJECT_2_MEMBER_IDS = ['u-eng2', 'u-coord', 'u-admin'];
+
 const STATUSES = [
   { id: 'st-open', name: 'Open', sequence: 1, isClosedState: false },
   { id: 'st-inprogress', name: 'In Progress', sequence: 2, isClosedState: false },
@@ -91,7 +117,7 @@ const CLASH_DESCRIPTION =
 
 const ENGINEER_IDS = ['u-eng', 'u-eng2', 'u-eng3', 'u-eng4', 'u-eng5', 'u-eng6', 'u-eng7'];
 const REPORTER_IDS = [...ENGINEER_IDS, 'u-coord'];
-const ASSIGNEE_IDS: (string | null)[] = [...ENGINEER_IDS, 'u-coord', null];
+const ASSIGNEE_IDS: (string | null)[] = [...ENGINEER_IDS, null];
 
 function mulberry32(seed: number) {
   return function random() {
@@ -220,6 +246,67 @@ async function seedClashes(projectCode: string) {
   console.log(`Seed clash selesai: ${clashRows.length} clash, ${auditRows.length} audit log, ${commentRows.length} komentar.`);
 }
 
+/** Small, independent clash set for proj-2 — scoped existence check (unlike
+ * seedClashes' global count) so it still seeds even once proj-1 already has
+ * clash rows. */
+async function seedProject2Clashes() {
+  const existing = await prisma.clash.count({ where: { projectId: PROJECT_2.id } });
+  if (existing > 0) {
+    console.log(`Clash proj-2 sudah ada (${existing}), lewati seeding.`);
+    return;
+  }
+
+  const rng = mulberry32(7);
+  const now = new Date('2026-07-31T09:00:00');
+  const disciplineCounters: Record<string, number> = {};
+  const reporterIds = ['u-eng2', 'u-coord'];
+  const assigneeIds: (string | null)[] = ['u-eng2', null];
+
+  const clashRows: Prisma.ClashCreateManyInput[] = [];
+  const auditRows: Prisma.AuditLogCreateManyInput[] = [];
+
+  for (let i = 0; i < 12; i++) {
+    const discipline = pick(rng, DISCIPLINES_2);
+    const zone = pick(rng, ZONES_2);
+    const priority = pick(rng, PRIORITIES);
+    const status = rng() < 0.5 ? STATUSES[0] : STATUSES[1];
+    const reporterId = pick(rng, reporterIds);
+    const assigneeId = pick(rng, assigneeIds);
+    const createdAt = addDays(now, -Math.floor(rng() * 60));
+    const dueDate = rng() < 0.85 ? addDays(createdAt, 5 + Math.floor(rng() * 25)) : null;
+    const id = randomUUID();
+
+    disciplineCounters[discipline.code] = (disciplineCounters[discipline.code] ?? 0) + 1;
+    const uniqueCode = `${PROJECT_2.code}-${discipline.code}-${String(
+      disciplineCounters[discipline.code],
+    ).padStart(4, '0')}`;
+
+    clashRows.push({
+      id,
+      uniqueCode,
+      projectId: PROJECT_2.id,
+      title: pick(rng, CLASH_TITLES),
+      description: CLASH_DESCRIPTION,
+      disciplineId: discipline.id,
+      zoneId: zone.id,
+      statusId: status.id,
+      priorityId: priority.id,
+      reporterId,
+      assigneeId,
+      dueDate,
+      createdAt,
+      closedAt: null,
+    });
+
+    auditRows.push({ clashId: id, actorId: reporterId, action: 'created', createdAt });
+  }
+
+  await prisma.clash.createMany({ data: clashRows });
+  await prisma.auditLog.createMany({ data: auditRows });
+
+  console.log(`Seed clash proj-2 selesai: ${clashRows.length} clash.`);
+}
+
 async function main() {
   const project = await prisma.project.upsert({
     where: { id: PROJECT.id },
@@ -269,8 +356,38 @@ async function main() {
 
   await seedClashes(project.code);
 
+  // --- Second project — see PROJECT_2's comment above. ----------------------
+  const project2 = await prisma.project.upsert({
+    where: { id: PROJECT_2.id },
+    update: { name: PROJECT_2.name, code: PROJECT_2.code },
+    create: PROJECT_2,
+  });
+
+  for (const discipline of DISCIPLINES_2) {
+    const data = { ...discipline, projectId: project2.id };
+    await prisma.discipline.upsert({ where: { id: data.id }, update: data, create: data });
+  }
+
+  for (const zone of ZONES_2) {
+    const data = { ...zone, projectId: project2.id };
+    await prisma.zone.upsert({ where: { id: data.id }, update: data, create: data });
+  }
+
+  for (const userId of PROJECT_2_MEMBER_IDS) {
+    const user = USERS.find((u) => u.id === userId);
+    if (!user) continue;
+    await prisma.projectMember.upsert({
+      where: { projectId_userId: { projectId: project2.id, userId } },
+      update: { projectRole: user.role },
+      create: { projectId: project2.id, userId, projectRole: user.role },
+    });
+  }
+
+  await seedProject2Clashes();
+
   console.log('Seed selesai:', {
     project: project.code,
+    project2: project2.code,
     statuses: STATUSES.map((s) => s.name),
     priorities: PRIORITIES.map((p) => p.name),
     disciplines: DISCIPLINES.map((d) => d.code),

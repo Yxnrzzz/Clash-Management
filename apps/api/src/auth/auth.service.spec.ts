@@ -16,15 +16,16 @@ function makeUser(overrides: Partial<User> = {}): User {
     passwordHash: '',
     role: Role.ENGINEER,
     isActive: true,
+    refreshTokenVersion: 0,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
   };
 }
 
-function makeService(user: User | null) {
+function makeService(user: User | null, updateMock = jest.fn().mockResolvedValue(user)) {
   const prisma = {
-    user: { findUnique: jest.fn().mockResolvedValue(user) },
+    user: { findUnique: jest.fn().mockResolvedValue(user), update: updateMock },
   } as unknown as PrismaService;
 
   const config = {
@@ -92,8 +93,59 @@ describe('AuthService.issueTokens', () => {
       email: user.email,
       role: Role.COORDINATOR,
     });
-    // The refresh token deliberately carries only the subject.
-    expect(jwt.decode(refreshToken)).toMatchObject({ sub: user.id });
+    // The refresh token deliberately carries only the subject and the
+    // version it was issued with — no PII, no role.
+    expect(jwt.decode(refreshToken)).toMatchObject({ sub: user.id, ver: user.refreshTokenVersion });
     expect(jwt.decode(refreshToken)).not.toHaveProperty('role');
+  });
+});
+
+describe('AuthService.refresh', () => {
+  it('issues a fresh pair when the token version matches the user', async () => {
+    const user = makeUser({ refreshTokenVersion: 2 });
+    const service = makeService(user);
+    const { refreshToken } = service.issueTokens(user);
+
+    await expect(service.refresh(refreshToken)).resolves.toMatchObject({ user });
+  });
+
+  it('rejects a refresh token whose version predates the user\'s current one', async () => {
+    // Simulates a stolen/old token: it was issued while the user's version
+    // was 0, but the user has since logged out (bumping it to 1).
+    const staleToken = makeService(null).issueTokens(makeUser({ refreshTokenVersion: 0 }))
+      .refreshToken;
+    const service = makeService(makeUser({ refreshTokenVersion: 1 }));
+
+    await expect(service.refresh(staleToken)).rejects.toThrow(UnauthorizedException);
+  });
+
+  it('rejects a missing token', async () => {
+    const service = makeService(null);
+    await expect(service.refresh(undefined)).rejects.toThrow(UnauthorizedException);
+  });
+});
+
+describe('AuthService.invalidateSession', () => {
+  it('increments the refresh token version for the token\'s subject', async () => {
+    const user = makeUser({ refreshTokenVersion: 0 });
+    const updateMock = jest.fn().mockResolvedValue(undefined);
+    const service = makeService(user, updateMock);
+    const { refreshToken } = service.issueTokens(user);
+
+    await service.invalidateSession(refreshToken);
+
+    expect(updateMock).toHaveBeenCalledWith({
+      where: { id: user.id },
+      data: { refreshTokenVersion: { increment: 1 } },
+    });
+  });
+
+  it('is a no-op (does not throw) for a missing or invalid token', async () => {
+    const updateMock = jest.fn();
+    const service = makeService(null, updateMock);
+
+    await expect(service.invalidateSession(undefined)).resolves.toBeUndefined();
+    await expect(service.invalidateSession('not-a-real-token')).resolves.toBeUndefined();
+    expect(updateMock).not.toHaveBeenCalled();
   });
 });

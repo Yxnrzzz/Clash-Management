@@ -6,7 +6,7 @@ import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
 import { useMasterDataLookups } from "@/lib/use-master-data";
 import { apiDownloadBlob } from "@/lib/api/client";
-import { canComment, canEditClash, formatBytes, formatDateTime } from "@/lib/lookup";
+import { canComment, canEditClash, formatBytes, formatDateTime, isAssignable } from "@/lib/lookup";
 import { PriorityBadge, StatusBadge, OverdueBadge } from "@/components/Badge";
 
 type Tab = "lampiran" | "komentar" | "riwayat";
@@ -27,9 +27,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
   } = useData();
   const { priorities, disciplineById, zoneById, statusById, priorityById, userById, isOverdue, allowedStatusTransitions } =
     useMasterDataLookups();
-  const assignableUsers = users.filter(
-    (u) => u.isActive && (u.peran === "Engineer" || u.peran === "Coordinator")
-  );
+  const assignableUsers = users.filter(isAssignable);
   const [tab, setTab] = useState<Tab>("lampiran");
   const [commentText, setCommentText] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);

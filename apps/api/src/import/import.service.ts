@@ -55,12 +55,6 @@ export class ImportService {
     @InjectQueue(IMPORT_QUEUE) private readonly queue: Queue<ImportJobPayload>,
   ) {}
 
-  private async currentProject() {
-    const project = await this.prisma.project.findFirst({ orderBy: { createdAt: 'asc' } });
-    if (!project) throw new NotFoundException('Belum ada proyek.');
-    return project;
-  }
-
   /**
    * Parses the uploaded file just enough to drive the mapping step (sample
    * rows + detected columns), then persists the raw file so commit() doesn't
@@ -95,14 +89,13 @@ export class ImportService {
    * request that bypasses the UI) that sets it is rejected outright rather
    * than silently downgraded, so the caller finds out immediately.
    */
-  async commit(dto: CommitImportDto, user: AuthUser) {
+  async commit(dto: CommitImportDto, user: AuthUser, projectId: string) {
     if (dto.autoCreateMasterData && user.role !== Role.ADMIN) {
       throw new ForbiddenException(
         'Hanya Admin yang dapat mengaktifkan pembuatan master data otomatis saat impor.',
       );
     }
 
-    const project = await this.currentProject();
     const format = detectImportFormat(dto.token);
     const buffer = await this.readStoredFile(dto.token);
     const { rows } = parseTable(format, buffer.toString('utf-8'));
@@ -113,7 +106,7 @@ export class ImportService {
 
     const job = await this.prisma.importJob.create({
       data: {
-        projectId: project.id,
+        projectId,
         createdById: user.id,
         fileName: dto.fileName,
         storageKey: dto.token,

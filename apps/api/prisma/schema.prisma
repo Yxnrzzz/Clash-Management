@@ -39,6 +39,12 @@ model User {
   passwordHash String
   role         Role
   isActive     Boolean  @default(true)
+  // Bumped on logout (and could be on password change). Refresh JWTs carry
+  // the version they were issued with; a mismatch means the token predates
+  // the last logout and is rejected even though its signature/exp are still
+  // valid — this is what makes logout actually invalidate stolen tokens
+  // instead of merely clearing the browser's cookie.
+  refreshTokenVersion Int      @default(0)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

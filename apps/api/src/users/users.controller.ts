@@ -1,9 +1,12 @@
 import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { Roles } from '../common/decorators/roles.decorator';
+import { SkipProjectScope } from '../common/decorators/skip-project-scope.decorator';
 import { CreateUserDto, SetActiveDto, UpdateUserDto } from './dto/user.dto';
 import { UsersService } from './users.service';
 
+/** User management is global, not scoped to any single project. */
+@SkipProjectScope()
 @Controller('users')
 export class UsersController {
   constructor(private readonly users: UsersService) {}

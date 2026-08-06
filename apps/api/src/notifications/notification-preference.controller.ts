@@ -1,10 +1,14 @@
 import { Body, Controller, Get, Patch } from '@nestjs/common';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { SkipProjectScope } from '../common/decorators/skip-project-scope.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { NotificationPreferenceService } from './notification-preference.service';
 import { UpdateNotificationPreferenceDto } from './dto/notification-preference.dto';
 
-/** No @Roles() — every signed-in user manages only their own preference, scoped via CurrentUser. */
+/** No @Roles() — every signed-in user manages only their own preference, scoped
+ * via CurrentUser. Not project data at all (no projectId column), so it's
+ * exempt from ProjectContextGuard's X-Project-Id requirement. */
+@SkipProjectScope()
 @Controller('notification-preferences')
 export class NotificationPreferenceController {
   constructor(private readonly service: NotificationPreferenceService) {}
