@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { canComment, canEditClash, formatBytes, formatDate, formatDateTime, isAdmin, isAssignable } from "./lookup";
-import type { Clash, User } from "./types";
+import {
+  allowedStatusTransitions,
+  canComment,
+  canEditClash,
+  formatBytes,
+  formatDate,
+  formatDateTime,
+  isAdmin,
+  isAssignable,
+} from "./lookup";
+import type { Clash, Status, User } from "./types";
 
 function makeUser(overrides: Partial<User> = {}): User {
   return {
@@ -32,6 +41,22 @@ function makeClash(overrides: Partial<Clash> = {}): Clash {
     ...overrides,
   };
 }
+
+function makeStatus(overrides: Partial<Status> = {}): Status {
+  return {
+    id: "s1",
+    nama: "Open",
+    urutan: 1,
+    isClosedState: false,
+    ...overrides,
+  };
+}
+
+const STATUSES: Status[] = [
+  makeStatus({ id: "s-open", nama: "Open", urutan: 1, isClosedState: false }),
+  makeStatus({ id: "s-inprogress", nama: "In Progress", urutan: 2, isClosedState: false }),
+  makeStatus({ id: "s-closed", nama: "Closed", urutan: 3, isClosedState: true }),
+];
 
 describe("formatDate", () => {
   it('returns "-" for null', () => {
@@ -121,5 +146,55 @@ describe("isAssignable", () => {
 
   it.each(["Coordinator", "Management", "Admin"] as const)("denies %s", (peran) => {
     expect(isAssignable(makeUser({ peran, isActive: true }))).toBe(false);
+  });
+});
+
+describe("allowedStatusTransitions", () => {
+  it.each(["Coordinator", "Admin"] as const)(
+    "%s may move to any other status",
+    (peran) => {
+      const clash = makeClash({ statusId: "s-open" });
+      expect(allowedStatusTransitions(STATUSES, peran, clash, "someone-else")).toEqual([
+        "s-inprogress",
+        "s-closed",
+      ]);
+    },
+  );
+
+  it("assigned Engineer may only move one step forward into a non-closed status", () => {
+    const clash = makeClash({ statusId: "s-open", assigneeId: "user-1" });
+    expect(allowedStatusTransitions(STATUSES, "Engineer", clash, "user-1")).toEqual([
+      "s-inprogress",
+    ]);
+  });
+
+  it("assigned Engineer cannot close an item, even one step forward", () => {
+    const clash = makeClash({ statusId: "s-inprogress", assigneeId: "user-1" });
+    expect(allowedStatusTransitions(STATUSES, "Engineer", clash, "user-1")).toEqual([]);
+  });
+
+  it("unassigned Engineer gets no transitions", () => {
+    const clash = makeClash({ statusId: "s-open", assigneeId: "someone-else" });
+    expect(allowedStatusTransitions(STATUSES, "Engineer", clash, "user-1")).toEqual([]);
+  });
+
+  it("Management gets no transitions", () => {
+    const clash = makeClash({ statusId: "s-open", assigneeId: "user-1" });
+    expect(allowedStatusTransitions(STATUSES, "Management", clash, "user-1")).toEqual([]);
+  });
+
+  it("returns an empty list when the clash's statusId isn't in master data", () => {
+    const clash = makeClash({ statusId: "s-unknown" });
+    expect(allowedStatusTransitions(STATUSES, "Admin", clash, "user-1")).toEqual([]);
+  });
+
+  it("checks isClosedState, not the status name — renaming 'Closed' can't open a loophole", () => {
+    const statuses = [
+      makeStatus({ id: "s-open", nama: "Open", urutan: 1, isClosedState: false }),
+      // Renamed away from "Closed" but still flagged as a closed state.
+      makeStatus({ id: "s-done", nama: "Selesai", urutan: 2, isClosedState: true }),
+    ];
+    const clash = makeClash({ statusId: "s-open", assigneeId: "user-1" });
+    expect(allowedStatusTransitions(statuses, "Engineer", clash, "user-1")).toEqual([]);
   });
 });

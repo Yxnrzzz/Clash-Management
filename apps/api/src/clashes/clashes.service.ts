@@ -348,15 +348,63 @@ export class ClashesService {
    * membership on Project A can't be used to pull an attachment id guessed
    * or observed from Project B.
    */
-  async getAttachmentForDownload(clashId: string, attachmentId: string, user: AuthUser, projectId: string) {
+  private async assertAttachmentInClash(clashId: string, attachmentId: string, projectId: string) {
     await this.assertClashInProject(clashId, projectId);
 
     const attachment = await this.prisma.attachment.findUnique({ where: { id: attachmentId } });
     if (!attachment || attachment.clashId !== clashId) {
       throw new NotFoundException('Lampiran tidak ditemukan.');
     }
+    return attachment;
+  }
+
+  async getAttachmentForDownload(clashId: string, attachmentId: string, user: AuthUser, projectId: string) {
+    const attachment = await this.assertAttachmentInClash(clashId, attachmentId, projectId);
+    return { attachment, stream: this.storage.readStream(attachment.fileUrl) };
+  }
+
+  /**
+   * Same RBAC/scoping as getAttachmentForDownload, but instead of streaming
+   * the file now, hands back a short-lived signed token the caller can use
+   * against the @Public() route below without carrying auth headers/cookies
+   * — the piece that matters once storage moves off local disk to S3/R2,
+   * where the browser would fetch bytes straight from the object store
+   * rather than proxying through this API. The token is bound to
+   * `attachmentId`, not the raw storage key, so the public route can look
+   * the attachment up by (indexed) id instead of trusting a client-supplied
+   * path — see streamBySignedToken().
+   */
+  async getAttachmentSignedUrl(clashId: string, attachmentId: string, user: AuthUser, projectId: string) {
+    const attachment = await this.assertAttachmentInClash(clashId, attachmentId, projectId);
+    const { token, expiresAt } = this.storage.signKey(this.signedUrlSubject(attachment.id));
+    return {
+      url: `/clashes/attachments/${attachment.id}/signed?token=${token}&expiresAt=${expiresAt}`,
+      expiresAt,
+    };
+  }
+
+  /**
+   * @Public() counterpart of getAttachmentSignedUrl — no user/project
+   * context available here (or trusted, if present), so authorization is
+   * entirely the signature: it proves this exact attachmentId+expiry was
+   * issued by getAttachmentSignedUrl above, nothing more (no revocation
+   * once issued, matching a normal short-TTL signed URL's guarantees).
+   */
+  async streamBySignedToken(attachmentId: string, token: string, expiresAt: number) {
+    const attachment = await this.prisma.attachment.findUnique({ where: { id: attachmentId } });
+    if (!attachment) throw new NotFoundException('Lampiran tidak ditemukan.');
+
+    if (!this.storage.verifySignedKey(this.signedUrlSubject(attachment.id), token, expiresAt)) {
+      throw new ForbiddenException('Tautan tidak valid atau sudah kedaluwarsa.');
+    }
 
     return { attachment, stream: this.storage.readStream(attachment.fileUrl) };
+  }
+
+  /** What actually gets signed — attachmentId, not the storage key itself,
+   * so a signed URL never reveals (or requires trusting) a filesystem path. */
+  private signedUrlSubject(attachmentId: string): string {
+    return `attachment:${attachmentId}`;
   }
 
   // --- Create ------------------------------------------------------------------

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
 import { useMasterDataLookups } from "@/lib/use-master-data";
-import { apiDownloadBlob } from "@/lib/api/client";
+import { apiGet } from "@/lib/api/client";
 import { canComment, canEditClash, formatBytes, formatDateTime, isAssignable } from "@/lib/lookup";
 import { PriorityBadge, StatusBadge, OverdueBadge } from "@/components/Badge";
 
@@ -41,9 +41,12 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loadClashDetail is stable; only re-run when the route id changes
   }, [id]);
 
-  // Fetches a blob preview URL for each attachment not already fetched.
-  // Unlike the old session-only object URLs, this re-fetches from the server
-  // on every mount, so previews survive a reload (see HANDOFF.md §5).
+  // Fetches a short-lived signed URL for each attachment not already
+  // fetched, and uses it directly as the <img>/<a> src — no auth headers
+  // needed for the browser to load it, and no blob object URL (or its
+  // matching revoke-on-unmount) to manage. Re-fetches on every mount, same
+  // as the old blob-fetch approach, so previews survive a reload (see
+  // HANDOFF.md §5); each url expires 5 minutes after being issued.
   useEffect(() => {
     const missing = attachments.filter(
       (a) => a.clashId === id && !previewUrlsRef.current[a.id]
@@ -54,8 +57,10 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     Promise.all(
       missing.map(async (a) => {
         try {
-          const blob = await apiDownloadBlob(`/clashes/${id}/attachments/${a.id}/download`);
-          return [a.id, URL.createObjectURL(blob)] as const;
+          const { url } = await apiGet<{ url: string }>(
+            `/clashes/${id}/attachments/${a.id}/signed-url`
+          );
+          return [a.id, `/api${url}`] as const;
         } catch {
           return null;
         }
@@ -72,13 +77,6 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
       cancelled = true;
     };
   }, [attachments, id]);
-
-  // Revoke every blob URL this page created, once, on unmount.
-  useEffect(() => {
-    return () => {
-      Object.values(previewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
-    };
-  }, []);
 
   if (isLoading || !user) {
     return <div className="p-8 text-sm text-zinc-500">Memuat…</div>;
@@ -217,7 +215,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                             className="flex items-center gap-3 rounded-lg border border-zinc-200 p-3"
                           >
                             {previewUrl && a.tipe === "image" ? (
-                              // eslint-disable-next-line @next/next/no-img-element -- object URL, next/image can't optimize blob: sources
+                              // eslint-disable-next-line @next/next/no-img-element -- signed, expiring API URL; next/image's optimizer would need a stable public URL
                               <img
                                 src={previewUrl}
                                 alt={a.namaFile}

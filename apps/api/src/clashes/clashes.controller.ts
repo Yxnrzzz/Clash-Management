@@ -17,6 +17,7 @@ import type { Response } from 'express';
 import { Role } from '@prisma/client';
 import { ActiveProject } from '../common/decorators/active-project.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { Public } from '../common/decorators/public.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { AuthUser } from '../auth/auth.types';
 import {
@@ -137,6 +138,48 @@ export class ClashesController {
       attachmentId,
       user,
       projectId,
+    );
+    res.set({
+      'Content-Type': attachment.fileType,
+      'Content-Disposition': `inline; filename="${encodeURIComponent(attachment.fileName)}"`,
+    });
+    return new StreamableFile(stream);
+  }
+
+  /**
+   * Hands back a short-lived (5 min) signed URL for the same attachment
+   * instead of streaming it directly — for embedding in <img src> where the
+   * browser can't be made to carry the Authorization/X-Project-Id headers a
+   * normal API call needs. Same RBAC/scoping as downloadAttachment above.
+   */
+  @Get(':clashId/attachments/:attachmentId/signed-url')
+  getAttachmentSignedUrl(
+    @Param('clashId') clashId: string,
+    @Param('attachmentId') attachmentId: string,
+    @CurrentUser() user: AuthUser,
+    @ActiveProject() projectId: string,
+  ) {
+    return this.clashes.getAttachmentSignedUrl(clashId, attachmentId, user, projectId);
+  }
+
+  /**
+   * @Public(): the whole point is that the browser hits this with no auth
+   * headers at all, just the token+expiresAt query params issued above.
+   * ProjectContextGuard also no-ops here (it only scopes requests that
+   * carry an authenticated user — see its canActivate()).
+   */
+  @Public()
+  @Get('attachments/:attachmentId/signed')
+  async streamSignedAttachment(
+    @Param('attachmentId') attachmentId: string,
+    @Query('token') token: string,
+    @Query('expiresAt') expiresAt: string,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { attachment, stream } = await this.clashes.streamBySignedToken(
+      attachmentId,
+      token,
+      Number(expiresAt),
     );
     res.set({
       'Content-Type': attachment.fileType,

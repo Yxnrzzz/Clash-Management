@@ -7,6 +7,8 @@ import {
   ValidationPipe,
 } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
+import { ConfigModule } from '@nestjs/config';
+import { getQueueToken } from '@nestjs/bullmq';
 import { Test } from '@nestjs/testing';
 import { Role } from '@prisma/client';
 import request from 'supertest';
@@ -16,6 +18,8 @@ import { ProjectsModule } from '../projects/projects.module';
 import { PrismaService } from '../prisma/prisma.service';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { ProjectContextGuard } from '../common/guards/project-context.guard';
+import { NOTIFICATIONS_QUEUE } from '../notifications/notifications.types';
+import { NotificationsProcessor } from '../notifications/notifications.processor';
 
 /**
  * Proves the multi-project authorization boundary end-to-end over real HTTP
@@ -27,13 +31,26 @@ import { ProjectContextGuard } from '../common/guards/project-context.guard';
  * Prisma is an in-memory fake (same spirit as the other *.spec.ts files in
  * this codebase) so this needs no real Postgres/Redis — only ClashesModule/
  * MasterDataModule/ProjectsModule are wired up, not ImportModule (which
- * would require a live BullMQ/Redis connection to bootstrap).
+ * would require a live BullMQ/Redis connection to bootstrap). ClashesModule
+ * transitively pulls in NotificationsModule (for enqueueing on
+ * assign/status-change) and StorageModule (for attachments), which need a
+ * real ConfigService and the BullMQ queue provider respectively —
+ * ConfigModule.forRoot() supplies the former; the queue token is overridden
+ * below with a stub rather than connecting to Redis, since nothing here
+ * exercises notification delivery.
  */
 
 // --- Fixtures: two isolated projects ----------------------------------------
 
 const PROJECT_A = { id: 'proj-a', name: 'Project A', code: 'AAA' };
 const PROJECT_B = { id: 'proj-b', name: 'Project B', code: 'BBB' };
+
+// BulkUpdateClashDto validates `ids` with @IsUUID — a human-readable id like
+// "clash-a" would 400 before the request ever reaches the service, so the
+// clash fixtures need real UUID-shaped ids (unlike project/discipline/zone
+// ids above, which no DTO in this suite validates as UUIDs).
+const CLASH_A_ID = 'c1a10000-0000-4000-8000-000000000001';
+const CLASH_B_ID = 'c1a10000-0000-4000-8000-000000000002';
 
 const ENGINEER_A = { id: 'u-eng-a', role: Role.ENGINEER };
 const ENGINEER_B = { id: 'u-eng-b', role: Role.ENGINEER };
@@ -61,17 +78,41 @@ const STATUSES = [
 ];
 const PRIORITIES = [{ id: 'pr-low', name: 'Low', weight: 1 }];
 
-function makeClash(overrides: Partial<Record<string, unknown>>) {
+type ClashFixture = {
+  id: string;
+  projectId: string;
+  disciplineId: string;
+  zoneId: string;
+  reporterId: string;
+  assigneeId: string | null;
+  uniqueCode: string;
+  title: string;
+  description: string;
+  statusId: string;
+  priorityId: string;
+  dueDate: Date | null;
+  createdAt: Date;
+  closedAt: Date | null;
+  externalId: string | null;
+};
+
+function makeClash(
+  overrides: Pick<
+    ClashFixture,
+    'id' | 'projectId' | 'disciplineId' | 'zoneId' | 'reporterId' | 'assigneeId'
+  > &
+    Partial<ClashFixture>,
+): ClashFixture {
   return {
-    uniqueCode: `${String(overrides.projectId)}-CODE`,
+    uniqueCode: `${overrides.projectId}-CODE`,
     title: 'Judul',
     description: 'Deskripsi',
     statusId: 'st-open',
     priorityId: 'pr-low',
-    dueDate: null as Date | null,
+    dueDate: null,
     createdAt: new Date('2026-07-01'),
-    closedAt: null as Date | null,
-    externalId: null as string | null,
+    closedAt: null,
+    externalId: null,
     ...overrides,
   };
 }
@@ -101,7 +142,12 @@ function authHeaders(user: { id: string; role: Role }, projectId?: string) {
 }
 
 @Module({
-  imports: [ClashesModule, MasterDataModule, ProjectsModule],
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true }),
+    ClashesModule,
+    MasterDataModule,
+    ProjectsModule,
+  ],
   providers: [
     { provide: APP_GUARD, useClass: TestAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
@@ -117,7 +163,7 @@ describe('Multi-project isolation (IDOR)', () => {
   beforeEach(async () => {
     clashes = [
       makeClash({
-        id: 'clash-a',
+        id: CLASH_A_ID,
         projectId: PROJECT_A.id,
         disciplineId: 'disc-a',
         zoneId: 'zone-a',
@@ -125,7 +171,7 @@ describe('Multi-project isolation (IDOR)', () => {
         assigneeId: ENGINEER_A.id,
       }),
       makeClash({
-        id: 'clash-b',
+        id: CLASH_B_ID,
         projectId: PROJECT_B.id,
         disciplineId: 'disc-b',
         zoneId: 'zone-b',
@@ -133,6 +179,40 @@ describe('Multi-project isolation (IDOR)', () => {
         assigneeId: ENGINEER_B.id,
       }),
     ];
+
+    // Declared outside the fakePrisma object literal (rather than as a
+    // nested proxy function) so both the top-level delegate and
+    // $transaction's tx.clash below can reference the same jest.fn mocks
+    // without a self-referential type (fakePrisma's own type depending on
+    // a function that reads fakePrisma.clash) that TypeScript can't infer.
+    const clashMock = {
+      findUnique: jest.fn(({ where: { id } }: { where: { id: string } }) =>
+        Promise.resolve(clashes.find((c) => c.id === id) ?? null),
+      ),
+      findMany: jest.fn(
+        ({ where }: { where: { projectId?: string; id?: { in: string[] } } }) =>
+          Promise.resolve(
+            clashes.filter(
+              (c) =>
+                (!where.projectId || c.projectId === where.projectId) &&
+                (!where.id || where.id.in.includes(c.id)),
+            ),
+          ),
+      ),
+      count: jest.fn(({ where }: { where: { projectId?: string } }) =>
+        Promise.resolve(
+          clashes.filter((c) => !where.projectId || c.projectId === where.projectId).length,
+        ),
+      ),
+      update: jest.fn(
+        ({ where, data }: { where: { id: string }; data: Partial<ClashFixture> }) => {
+          const idx = clashes.findIndex((c) => c.id === where.id);
+          clashes[idx] = { ...clashes[idx], ...data };
+          return Promise.resolve(clashes[idx]);
+        },
+      ),
+      create: jest.fn(),
+    };
 
     const fakePrisma = {
       project: {
@@ -185,30 +265,7 @@ describe('Multi-project isolation (IDOR)', () => {
       user: {
         findUnique: jest.fn(() => Promise.resolve(null)),
       },
-      clash: {
-        findUnique: jest.fn(({ where: { id } }: { where: { id: string } }) =>
-          Promise.resolve(clashes.find((c) => c.id === id) ?? null),
-        ),
-        findMany: jest.fn(
-          ({ where }: { where: { projectId?: string; id?: { in: string[] } } }) =>
-            Promise.resolve(
-              clashes.filter(
-                (c) =>
-                  (!where.projectId || c.projectId === where.projectId) &&
-                  (!where.id || where.id.in.includes(c.id as string)),
-              ),
-            ),
-        ),
-        count: jest.fn(({ where }: { where: { projectId?: string } }) =>
-          Promise.resolve(clashes.filter((c) => !where.projectId || c.projectId === where.projectId).length),
-        ),
-        update: jest.fn(({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
-          const idx = clashes.findIndex((c) => c.id === where.id);
-          clashes[idx] = { ...clashes[idx], ...data };
-          return Promise.resolve(clashes[idx]);
-        }),
-        create: jest.fn(),
-      },
+      clash: clashMock,
       comment: {
         create: jest.fn(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'c-1', ...data })),
         findMany: jest.fn(() => Promise.resolve([])),
@@ -224,19 +281,22 @@ describe('Multi-project isolation (IDOR)', () => {
         findMany: jest.fn(() => Promise.resolve([])),
       },
       $transaction: jest.fn((fn: (tx: unknown) => Promise<unknown>) =>
-        fn({ clash: fakePrismaClashProxy(), auditLog: { createMany: jest.fn() } }),
+        fn({ clash: clashMock, auditLog: { createMany: jest.fn() } }),
       ),
     };
-
-    // $transaction's tx.clash.update must mutate the same `clashes` array as
-    // the top-level delegate — proxy so both refer to the same jest.fn.
-    function fakePrismaClashProxy() {
-      return fakePrisma.clash;
-    }
 
     const moduleRef = await Test.createTestingModule({ imports: [TestAppModule] })
       .overrideProvider(PrismaService)
       .useValue(fakePrisma)
+      .overrideProvider(getQueueToken(NOTIFICATIONS_QUEUE))
+      .useValue({ add: jest.fn() })
+      // useValue() clears wrapper.metatype, which is how @nestjs/bullmq's
+      // BullExplorer normally finds the @Processor() class to spin up a
+      // real Worker for — without this, app.init() tries to open an actual
+      // Redis connection ("Worker requires a connection"). Nothing here
+      // exercises notification delivery, so a stub is enough.
+      .overrideProvider(NotificationsProcessor)
+      .useValue({})
       .compile();
 
     app = moduleRef.createNestApplication();
@@ -264,14 +324,14 @@ describe('Multi-project isolation (IDOR)', () => {
 
   it('404s when the URL id belongs to a different project than the active header (id swap)', async () => {
     await request(app.getHttpServer())
-      .get('/clashes/clash-b')
+      .get(`/clashes/${CLASH_B_ID}`)
       .set(authHeaders(ENGINEER_A, PROJECT_A.id))
       .expect(404);
   });
 
   it('404s a PATCH update targeting a clash id from another project', async () => {
     await request(app.getHttpServer())
-      .patch('/clashes/clash-b')
+      .patch(`/clashes/${CLASH_B_ID}`)
       .set(authHeaders(ENGINEER_A, PROJECT_A.id))
       .send({ statusId: 'st-inprogress' })
       .expect(404);
@@ -279,7 +339,7 @@ describe('Multi-project isolation (IDOR)', () => {
 
   it('404s adding a comment to a clash id from another project', async () => {
     await request(app.getHttpServer())
-      .post('/clashes/clash-b/comments')
+      .post(`/clashes/${CLASH_B_ID}/comments`)
       .set(authHeaders(ENGINEER_A, PROJECT_A.id))
       .send({ content: 'halo' })
       .expect(404);
@@ -289,11 +349,11 @@ describe('Multi-project isolation (IDOR)', () => {
     await request(app.getHttpServer())
       .post('/clashes/bulk')
       .set(authHeaders(COORDINATOR, PROJECT_A.id))
-      .send({ ids: ['clash-a', 'clash-b'], patch: { statusId: 'st-inprogress' } })
+      .send({ ids: [CLASH_A_ID, CLASH_B_ID], patch: { statusId: 'st-inprogress' } })
       .expect(404);
 
     // Nothing should have been mutated — the batch is all-or-nothing.
-    expect(clashes.find((c) => c.id === 'clash-a')?.statusId).toBe('st-open');
+    expect(clashes.find((c) => c.id === CLASH_A_ID)?.statusId).toBe('st-open');
   });
 
   it('list only returns clashes belonging to the active project, ignoring a foreign projectId in the query string', async () => {
@@ -303,7 +363,7 @@ describe('Multi-project isolation (IDOR)', () => {
       .set(authHeaders(ENGINEER_A, PROJECT_A.id))
       .expect(200);
 
-    expect(res.body.data.map((c: { id: string }) => c.id)).toEqual(['clash-a']);
+    expect(res.body.data.map((c: { id: string }) => c.id)).toEqual([CLASH_A_ID]);
   });
 
   it('master-data disciplines are scoped to the active project', async () => {
@@ -322,12 +382,12 @@ describe('Multi-project isolation (IDOR)', () => {
 
   it('lets Coordinator/Admin/Management reach a project they hold no ProjectMember row in', async () => {
     await request(app.getHttpServer())
-      .get('/clashes/clash-b')
+      .get(`/clashes/${CLASH_B_ID}`)
       .set(authHeaders(COORDINATOR, PROJECT_B.id))
       .expect(200);
 
     await request(app.getHttpServer())
-      .get('/clashes/clash-a')
+      .get(`/clashes/${CLASH_A_ID}`)
       .set(authHeaders(ADMIN, PROJECT_A.id))
       .expect(200);
   });

@@ -3,7 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { BullModule } from '@nestjs/bullmq';
 import { ScheduleModule } from '@nestjs/schedule';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 import { PrismaModule } from './prisma/prisma.module';
 import { HealthModule } from './health/health.module';
@@ -17,6 +17,7 @@ import { ImportModule } from './import/import.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { ProjectContextGuard } from './common/guards/project-context.guard';
+import { UserThrottlerGuard } from './common/guards/user-throttler.guard';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { envValidationSchema } from './config/env.validation';
 
@@ -40,15 +41,16 @@ import { envValidationSchema } from './config/env.validation';
       },
     }),
     ScheduleModule.forRoot(),
-    // Global default, per IP. 100/min turned out to be too tight for real
-    // usage — a k6 run against the Register with just 10 virtual users
-    // tripped it within seconds (measured Sprint 11, see HANDOFF.md §12),
-    // and legitimate concurrent use (several engineers filtering/paginating
-    // at once, possibly behind the same office NAT) looks the same on the
-    // wire as a burst. 600/min (10 req/s) still meaningfully bounds
-    // scripted abuse without being indistinguishable from normal load.
-    // Routes that need a stricter ceiling (e.g. /auth/login) override it
-    // with @Throttle() — see auth.controller.ts.
+    // Global default, tracked per authenticated user (per IP for @Public()
+    // requests — see UserThrottlerGuard). 100/min turned out to be too
+    // tight for real usage — a k6 run against the Register with just 10
+    // virtual users tripped it within seconds (measured Sprint 11, see
+    // HANDOFF.md §12) — and legitimate concurrent use (several engineers
+    // filtering/paginating at once) looks the same on the wire as a burst.
+    // 600/min (10 req/s) still meaningfully bounds scripted abuse without
+    // being indistinguishable from normal load. Routes that need a
+    // stricter ceiling (e.g. /auth/login) override it with @Throttle() —
+    // see auth.controller.ts.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 600 }]),
     BullModule.forRootAsync({
       imports: [ConfigModule],
@@ -71,12 +73,12 @@ import { envValidationSchema } from './config/env.validation';
     ImportModule,
   ],
   providers: [
-    // Order matters: JwtAuthGuard must populate request.user before RolesGuard
-    // reads the role off it, and ProjectContextGuard needs the role to decide
-    // whether membership is required. ThrottlerGuard runs first since it
-    // doesn't depend on any of them.
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // Order matters: JwtAuthGuard must run first and populate request.user
+    // before anything downstream reads it — UserThrottlerGuard needs it to
+    // track per-user instead of per-IP (see that guard's own comment), and
+    // RolesGuard/ProjectContextGuard need the role to decide what's allowed.
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: UserThrottlerGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
     { provide: APP_GUARD, useClass: ProjectContextGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

@@ -10,6 +10,8 @@ import { DashboardMetricsQueryDto, ListClashesQueryDto } from './dto/clash.dto';
 const fakeStorage = {
   save: jest.fn(() => Promise.resolve({ key: 'clash-1/fake-key.png' })),
   readStream: jest.fn(),
+  signKey: jest.fn((key: string) => ({ token: `signed(${key})`, expiresAt: Date.now() + 300_000 })),
+  verifySignedKey: jest.fn((key: string, token: string) => token === `signed(${key})`),
 } as unknown as StorageService;
 
 const fakeNotifications = {
@@ -675,6 +677,84 @@ describe('ClashesService.getAttachmentForDownload', () => {
 
     await expect(
       service.getAttachmentForDownload('clash-1', 'att-1', engineer, PROJECT.id),
+    ).rejects.toThrow(NotFoundException);
+  });
+});
+
+describe('ClashesService.getAttachmentSignedUrl', () => {
+  it('signs attachmentId, not the raw storage key or filesystem path', async () => {
+    const { prisma, attachment } = makePrisma(baseClash());
+    (attachment.findUnique as jest.Mock).mockResolvedValue({
+      id: 'att-1',
+      clashId: 'clash-1',
+      fileUrl: 'clash-1/fake-key.png',
+    });
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    const result = await service.getAttachmentSignedUrl('clash-1', 'att-1', engineer, PROJECT.id);
+
+    expect(fakeStorage.signKey).toHaveBeenCalledWith('attachment:att-1');
+    expect(result.url).toContain('/clashes/attachments/att-1/signed?token=');
+    expect(result.url).not.toContain('fake-key.png');
+  });
+
+  it('throws NotFoundException for an attachment from another clash, same as getAttachmentForDownload', async () => {
+    const { prisma, attachment } = makePrisma(baseClash());
+    (attachment.findUnique as jest.Mock).mockResolvedValue({
+      id: 'att-1',
+      clashId: 'clash-other',
+      fileUrl: 'x',
+    });
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(
+      service.getAttachmentSignedUrl('clash-1', 'att-1', engineer, PROJECT.id),
+    ).rejects.toThrow(NotFoundException);
+  });
+});
+
+describe('ClashesService.streamBySignedToken', () => {
+  it('streams the attachment when the token verifies', async () => {
+    const { prisma, attachment } = makePrisma(baseClash());
+    (attachment.findUnique as jest.Mock).mockResolvedValue({
+      id: 'att-1',
+      clashId: 'clash-1',
+      fileUrl: 'clash-1/fake-key.png',
+    });
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    const result = await service.streamBySignedToken('att-1', 'signed(attachment:att-1)', Date.now() + 1000);
+
+    expect(fakeStorage.verifySignedKey).toHaveBeenCalledWith(
+      'attachment:att-1',
+      'signed(attachment:att-1)',
+      expect.any(Number),
+    );
+    expect(result.attachment.id).toBe('att-1');
+    expect(fakeStorage.readStream).toHaveBeenCalledWith('clash-1/fake-key.png');
+  });
+
+  it('throws ForbiddenException for a token that fails verification (expired, forged, or wrong attachment)', async () => {
+    const { prisma, attachment } = makePrisma(baseClash());
+    (attachment.findUnique as jest.Mock).mockResolvedValue({
+      id: 'att-1',
+      clashId: 'clash-1',
+      fileUrl: 'clash-1/fake-key.png',
+    });
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(
+      service.streamBySignedToken('att-1', 'not-the-right-token', Date.now() + 1000),
+    ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('throws NotFoundException when no attachment matches the id at all', async () => {
+    const { prisma, attachment } = makePrisma(baseClash());
+    (attachment.findUnique as jest.Mock).mockResolvedValue(null);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(
+      service.streamBySignedToken('att-ghost', 'anything', Date.now() + 1000),
     ).rejects.toThrow(NotFoundException);
   });
 });

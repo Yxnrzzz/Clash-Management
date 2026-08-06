@@ -21,6 +21,7 @@ export const envValidationSchema = Joi.object({
   JWT_REFRESH_TTL: Joi.string().default('7d'),
 
   UPLOAD_DIR: Joi.string().default('./uploads'),
+  ATTACHMENT_URL_SECRET: Joi.string().min(16).default('dev-attachment-url-secret-change-me'),
 
   SMTP_HOST: Joi.string().default('localhost'),
   SMTP_PORT: Joi.number().port().default(1025),
