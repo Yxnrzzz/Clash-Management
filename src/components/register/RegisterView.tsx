@@ -11,7 +11,7 @@ import {
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
 import { useMasterDataLookups } from "@/lib/use-master-data";
-import { formatDate } from "@/lib/lookup";
+import { formatDate, isAssignable } from "@/lib/lookup";
 import { exportClashesToExcel, exportClashesToPdf } from "@/lib/export";
 import { apiGet, ApiError } from "@/lib/api/client";
 import { toClash } from "@/lib/api/mappers";
@@ -239,11 +239,14 @@ export function RegisterView() {
       })),
     [zones]
   );
-  const assigneeOptions = useMemo(() => users.map((u) => ({ id: u.id, label: u.nama })), [users]);
-  const assignableUsers = useMemo(
-    () => users.filter((u) => u.isActive && (u.peran === "Engineer" || u.peran === "Coordinator")),
+  const assigneeOptions = useMemo(
+    () =>
+      users
+        .filter((u) => u.peran === "Engineer")
+        .map((u) => ({ id: u.id, label: u.isActive ? u.nama : `${u.nama} (nonaktif)` })),
     [users]
   );
+  const assignableUsers = useMemo(() => users.filter(isAssignable), [users]);
 
   // Filtering, sorting, and pagination all happen server-side now (see
   // HANDOFF.md §12) — this effect is the Register's only data fetch. It's
@@ -280,7 +283,7 @@ export function RegisterView() {
       cancelled = true;
       clearTimeout(timeout);
     };
-  }, [filters, reloadTick]);
+  }, [filters, reloadTick, project.id]);
 
   const currentPage = page;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -450,7 +453,7 @@ export function RegisterView() {
     setExportError(null);
     try {
       const all = await fetchAllMatching();
-      exportClashesToExcel(all, exportLookups, `clashhub-register-${dateStamp}.xlsx`);
+      exportClashesToExcel(all, exportLookups, `eps-workspace-register-${dateStamp}.xlsx`);
     } catch {
       setExportError("Gagal mengambil data untuk export. Periksa koneksi dan coba lagi.");
     } finally {
@@ -483,7 +486,7 @@ export function RegisterView() {
         exportLookups,
         { total: all.length, open: all.length - closedCount, closed: closedCount, overdue: overdueCount, mttrDays },
         project.nama,
-        `clashhub-register-${dateStamp}.pdf`
+        `eps-workspace-register-${dateStamp}.pdf`
       );
     } catch {
       setExportError("Gagal mengambil data untuk export. Periksa koneksi dan coba lagi.");

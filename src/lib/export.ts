@@ -76,7 +76,7 @@ export function exportClashesToPdf(
   });
 
   doc.setFontSize(14);
-  doc.text("ClashHub — Laporan Clash Register", 14, 16);
+  doc.text("EPS Workspace — Laporan Clash Register", 14, 16);
   doc.setFontSize(9);
   doc.setTextColor(100);
   doc.text(`${projectName} · Dibuat ${generatedAt}`, 14, 22);

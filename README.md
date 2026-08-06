@@ -1,6 +1,6 @@
-# ClashHub
+# EPS Workspace
 
-Web platform manajemen clash & issue koordinasi BIM, dibangun sesuai [ClashHub_PRD.md](./ClashHub_PRD.md).
+Web platform manajemen clash & issue koordinasi BIM, dibangun sesuai [ClashHub_PRD.md](./ClashHub_PRD.md) (nama produk berubah menjadi "EPS Workspace" setelah dokumen-dokumen sumber di bawah ditulis — lihat HANDOFF.md).
 
 Repo ini berisi dua paket:
 

@@ -1,6 +1,6 @@
-# ClashHub API — Sprint 0-9 (fondasi, auth/RBAC, clash lifecycle, notifikasi async, import CSV/XML)
+# EPS Workspace API — Sprint 0-9 (fondasi, auth/RBAC, clash lifecycle, notifikasi async, import CSV/XML)
 
-Backend NestJS untuk ClashHub. PostgreSQL & Redis dijalankan via Docker Compose, skema dikelola oleh Prisma ORM.
+Backend NestJS untuk EPS Workspace. PostgreSQL & Redis dijalankan via Docker Compose, skema dikelola oleh Prisma ORM.
 
 ## Stack
 
@@ -94,8 +94,11 @@ JWT_REFRESH_TTL="7d"
 | PATCH | `/api/users/:id` | Admin |
 | PATCH | `/api/users/:id/active` | Admin |
 | GET | `/api/projects/current` | semua yang login |
-| GET | `/api/projects` | Admin (daftar semua proyek — dipakai dialog "salin template" di master data) |
+| GET | `/api/projects` | semua yang login (di-filter ke keanggotaan sendiri, kecuali `CROSS_PROJECT_ROLES` yang dapat semua proyek — lihat §5) |
+| POST | `/api/projects` | Admin (buat proyek baru — belum punya disiplin/zona/anggota, lihat di bawah) |
 | PATCH | `/api/projects/:id` | Admin |
+| GET \| POST | `/api/projects/:projectId/members` | Admin |
+| DELETE | `/api/projects/:projectId/members/:userId` | Admin |
 | GET | `/api/master-data/disciplines` \| `zones` \| `statuses` \| `priorities` | semua yang login |
 | POST | `/api/master-data/disciplines` \| `zones` \| `priorities` | Admin |
 | PATCH | `/api/master-data/disciplines/:id` \| `zones/:id` \| `priorities/:id` \| `statuses/:id` | Admin |
@@ -116,7 +119,9 @@ JWT_REFRESH_TTL="7d"
 | POST | `/api/import/commit` | Coordinator, Admin (`autoCreateMasterData` hanya dihormati untuk Admin) |
 | GET | `/api/import/jobs/:id` | Coordinator, Admin (di-scope ke pembuat job atau Admin) |
 
-`PATCH /api/clashes/:id` menerima subset `{ statusId, priorityId, assigneeId, dueDate }`. Aturan siapa boleh mengubah field mana ditegakkan di `ClashesService` (`assertCanEdit`, `buildAllowedPatch`), bukan cuma `@Roles()` — lihat `src/clashes/clashes.service.ts`. Setiap field yang benar-benar berubah menulis satu baris `AuditLog`, dengan `oldValue`/`newValue` sudah diterjemahkan ke nama (bukan id mentah). `uniqueCode` pada `POST /api/clashes` dibuat server-side dalam transaksi, format `{kode-proyek}-{kode-disiplin}-{urutan 4 digit}`.
+`POST /api/projects` menerima `{ name, code }` (`code` 2-6 karakter alfanumerik, di-uppercase & di-trim server-side, harus unik — `409` kalau sudah dipakai; `code` jadi awalan `uniqueCode` clash di proyek itu). Proyek baru lahir kosong: belum ada `Discipline`/`Zone`/`ProjectMember` (`Priority`/`Status` global, otomatis ikut) — lengkapi lewat `POST /api/master-data/templates/copy` (salin dari proyek lain) dan `POST /api/projects/:projectId/members`. Frontend (`/admin/projects`) langsung menjadikan proyek baru sebagai proyek aktif setelah dibuat.
+
+`PATCH /api/clashes/:id` menerima subset `{ statusId, priorityId, assigneeId, dueDate }`. Aturan siapa boleh mengubah field mana ditegakkan di `ClashesService` (`assertCanEdit`, `buildAllowedPatch`), bukan cuma `@Roles()` — lihat `src/clashes/clashes.service.ts`. `assigneeId` hanya boleh diisi user Engineer yang aktif (atau `null` untuk melepas assignee) — ditegakkan `ClashesService.assertAssigneeIsEngineer()`, dipanggil dari `buildAllowedPatch()` (jalur `PATCH /api/clashes/:id`) maupun `bulkUpdate()` (jalur `POST /api/clashes/bulk`, yang tidak melalui `buildAllowedPatch`). Setiap field yang benar-benar berubah menulis satu baris `AuditLog`, dengan `oldValue`/`newValue` sudah diterjemahkan ke nama (bukan id mentah). `uniqueCode` pada `POST /api/clashes` dibuat server-side dalam transaksi, format `{kode-proyek}-{kode-disiplin}-{urutan 4 digit}`.
 
 ### `GET /api/clashes` — query params
 
@@ -178,7 +183,7 @@ Kedua bentuk XML di-flatten jadi baris berdasarkan atribut elemen (`<clashresult
 
 ## Template master data antar proyek
 
-`POST /master-data/templates/copy` `{ fromProjectId, toProjectId, include: ("disciplines"|"zones")[] }` (Admin). Menyalin baris **aktif** dari proyek sumber; baris yang sudah ada di tujuan (match `code` untuk disiplin, `name`+`level` untuk zona, case-insensitive) di-skip — idempoten, aman dijalankan berulang. `Priority`/`Status` tidak punya `projectId` (global), jadi tidak pernah ikut disalin. ClashHub saat ini single-project (tidak ada endpoint create/switch-project), jadi endpoint ini baru berguna praktis kalau proyek kedua sudah ada di database — logikanya sendiri sudah diuji independen di `master-data.service.spec.ts`.
+`POST /master-data/templates/copy` `{ fromProjectId, toProjectId, include: ("disciplines"|"zones")[] }` (Admin). Menyalin baris **aktif** dari proyek sumber; baris yang sudah ada di tujuan (match `code` untuk disiplin, `name`+`level` untuk zona, case-insensitive) di-skip — idempoten, aman dijalankan berulang. `Priority`/`Status` tidak punya `projectId` (global), jadi tidak pernah ikut disalin. EPS Workspace saat ini single-project (tidak ada endpoint create/switch-project), jadi endpoint ini baru berguna praktis kalau proyek kedua sudah ada di database — logikanya sendiri sudah diuji independen di `master-data.service.spec.ts`.
 
 ## Akun demo (hasil seed)
 

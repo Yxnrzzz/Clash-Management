@@ -7,6 +7,14 @@ import type { ApiSession } from "./types";
  */
 let accessToken: string | null = null;
 
+/**
+ * The backend resolves every project-scoped request (clashes, master-data,
+ * import) against this header rather than any per-user "current project"
+ * concept — see data-context.tsx's setActiveProject(). Routes that aren't
+ * project-scoped (auth, users, /projects itself) simply ignore it.
+ */
+let activeProjectId: string | null = null;
+
 /** Single in-flight refresh, so a burst of 401s does not fan out into N calls. */
 let refreshInFlight: Promise<ApiSession | null> | null = null;
 
@@ -22,6 +30,10 @@ export class ApiError extends Error {
 
 export function setAccessToken(token: string | null) {
   accessToken = token;
+}
+
+export function setActiveProjectId(projectId: string | null) {
+  activeProjectId = projectId;
 }
 
 async function readError(res: Response): Promise<string> {
@@ -42,6 +54,7 @@ function authHeaders(init?: RequestInit): HeadersInit {
   return {
     ...(init?.body && !isFormData ? { "Content-Type": "application/json" } : {}),
     ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    ...(activeProjectId ? { "X-Project-Id": activeProjectId } : {}),
     ...init?.headers,
   };
 }
@@ -107,6 +120,10 @@ export function apiPost<T>(path: string, body?: unknown): Promise<T> {
 
 export function apiPatch<T>(path: string, body: unknown): Promise<T> {
   return apiFetch<T>(path, { method: "PATCH", body: JSON.stringify(body) });
+}
+
+export function apiDelete<T>(path: string): Promise<T> {
+  return apiFetch<T>(path, { method: "DELETE" });
 }
 
 export function apiUpload<T>(path: string, formData: FormData): Promise<T> {

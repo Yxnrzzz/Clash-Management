@@ -24,7 +24,7 @@ export const envValidationSchema = Joi.object({
 
   SMTP_HOST: Joi.string().default('localhost'),
   SMTP_PORT: Joi.number().port().default(1025),
-  SMTP_FROM: Joi.string().default('ClashHub <noreply@clashhub.dev>'),
+  SMTP_FROM: Joi.string().default('EPS Workspace <noreply@clashhub.dev>'),
 
   WEB_BASE_URL: Joi.string().uri().default('http://localhost:3000'),
 

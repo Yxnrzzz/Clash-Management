@@ -21,20 +21,13 @@ import {
 export class MasterDataService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private async currentProjectId(): Promise<string> {
-    const project = await this.prisma.project.findFirst({ orderBy: { createdAt: 'asc' } });
-    if (!project) throw new NotFoundException('Belum ada proyek.');
-    return project.id;
-  }
-
   // --- Disciplines ---------------------------------------------------------
 
-  async listDisciplines() {
-    return this.prisma.discipline.findMany({ orderBy: { code: 'asc' } });
+  async listDisciplines(projectId: string) {
+    return this.prisma.discipline.findMany({ where: { projectId }, orderBy: { code: 'asc' } });
   }
 
-  async createDiscipline(dto: CreateDisciplineDto) {
-    const projectId = await this.currentProjectId();
+  async createDiscipline(dto: CreateDisciplineDto, projectId: string) {
     const code = dto.code.trim().toUpperCase();
 
     const clash = await this.prisma.discipline.findUnique({
@@ -47,9 +40,8 @@ export class MasterDataService {
     });
   }
 
-  async updateDiscipline(id: string, dto: UpdateDisciplineDto) {
-    const existing = await this.prisma.discipline.findUnique({ where: { id } });
-    if (!existing) throw new NotFoundException('Disiplin tidak ditemukan.');
+  async updateDiscipline(id: string, dto: UpdateDisciplineDto, projectId: string) {
+    const existing = await this.assertExists('discipline', id, 'Disiplin tidak ditemukan.', projectId);
 
     if (dto.code !== undefined) {
       const code = dto.code.trim().toUpperCase();
@@ -68,26 +60,28 @@ export class MasterDataService {
     });
   }
 
-  async setDisciplineActive(id: string, isActive: boolean) {
-    await this.assertExists('discipline', id, 'Disiplin tidak ditemukan.');
+  async setDisciplineActive(id: string, isActive: boolean, projectId: string) {
+    await this.assertExists('discipline', id, 'Disiplin tidak ditemukan.', projectId);
     return this.prisma.discipline.update({ where: { id }, data: { isActive } });
   }
 
   // --- Zones ---------------------------------------------------------------
 
-  async listZones() {
-    return this.prisma.zone.findMany({ orderBy: [{ level: 'asc' }, { name: 'asc' }] });
+  async listZones(projectId: string) {
+    return this.prisma.zone.findMany({
+      where: { projectId },
+      orderBy: [{ level: 'asc' }, { name: 'asc' }],
+    });
   }
 
-  async createZone(dto: CreateZoneDto) {
-    const projectId = await this.currentProjectId();
+  async createZone(dto: CreateZoneDto, projectId: string) {
     return this.prisma.zone.create({
       data: { projectId, name: dto.name.trim(), level: dto.level.trim() },
     });
   }
 
-  async updateZone(id: string, dto: UpdateZoneDto) {
-    await this.assertExists('zone', id, 'Zona tidak ditemukan.');
+  async updateZone(id: string, dto: UpdateZoneDto, projectId: string) {
+    await this.assertExists('zone', id, 'Zona tidak ditemukan.', projectId);
     return this.prisma.zone.update({
       where: { id },
       data: {
@@ -97,8 +91,8 @@ export class MasterDataService {
     });
   }
 
-  async setZoneActive(id: string, isActive: boolean) {
-    await this.assertExists('zone', id, 'Zona tidak ditemukan.');
+  async setZoneActive(id: string, isActive: boolean, projectId: string) {
+    await this.assertExists('zone', id, 'Zona tidak ditemukan.', projectId);
     return this.prisma.zone.update({ where: { id }, data: { isActive } });
   }
 
@@ -227,10 +221,18 @@ export class MasterDataService {
     return { copied, skipped };
   }
 
+  /**
+   * `projectId` is only meaningful for discipline/zone (priority has no
+   * projectId column — it's global). When passed, a row that exists but
+   * belongs to a different project is reported as NotFound, matching
+   * ClashesService's assertClashInProject: don't leak that the id exists
+   * elsewhere.
+   */
   private async assertExists(
     model: 'discipline' | 'zone' | 'priority',
     id: string,
     message: string,
+    projectId?: string,
   ) {
     const found =
       model === 'discipline'
@@ -239,6 +241,9 @@ export class MasterDataService {
           ? await this.prisma.zone.findUnique({ where: { id } })
           : await this.prisma.priority.findUnique({ where: { id } });
 
-    if (!found) throw new NotFoundException(message);
+    if (!found || (projectId !== undefined && (found as { projectId?: string }).projectId !== projectId)) {
+      throw new NotFoundException(message);
+    }
+    return found as { id: string; projectId: string };
   }
 }

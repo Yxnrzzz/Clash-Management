@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ClashHub — Manajemen Clash & Issue BIM",
+  title: "EPS Workspace — Manajemen Clash & Issue BIM",
   description: "Web platform manajemen clash dan issue koordinasi BIM.",
 };
 

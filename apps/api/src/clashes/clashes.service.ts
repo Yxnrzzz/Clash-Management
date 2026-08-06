@@ -82,10 +82,19 @@ export class ClashesService {
     private readonly notifications: NotificationsService,
   ) {}
 
-  private async currentProject() {
-    const project = await this.prisma.project.findFirst({ orderBy: { createdAt: 'asc' } });
-    if (!project) throw new NotFoundException('Belum ada proyek.');
-    return project;
+  /**
+   * Loads a clash and verifies it belongs to `projectId` — the guard for
+   * every resource-nested route (comments, attachments, update, detail).
+   * A clash that exists but belongs to a different project is reported as
+   * NotFound, not Forbidden, so callers can't use this to probe which ids
+   * exist in projects they aren't scoped into.
+   */
+  private async assertClashInProject(clashId: string, projectId: string) {
+    const clash = await this.prisma.clash.findUnique({ where: { id: clashId } });
+    if (!clash || clash.projectId !== projectId) {
+      throw new NotFoundException('Clash tidak ditemukan.');
+    }
+    return clash;
   }
 
   // --- Reads -----------------------------------------------------------------
@@ -96,9 +105,8 @@ export class ClashesService {
    * DTO), which is what lets the Register's export buttons reuse this same
    * method (page=1&pageSize=10000) instead of a separate unpaginated route.
    */
-  async list(query: ListClashesQueryDto) {
-    const project = await this.currentProject();
-    const where = this.buildListWhere(project.id, query);
+  async list(query: ListClashesQueryDto, projectId: string) {
+    const where = this.buildListWhere(projectId, query);
     const orderBy = this.buildListOrderBy(query.sort, query.dir);
 
     const [data, total] = await Promise.all([
@@ -179,12 +187,10 @@ export class ClashesService {
    * mapper formats it with the existing Indonesian-locale formatter so
    * locale-specific presentation stays out of the API contract.
    */
-  async metrics(query: DashboardMetricsQueryDto): Promise<DashboardMetrics> {
-    const project = await this.currentProject();
-
+  async metrics(query: DashboardMetricsQueryDto, projectId: string): Promise<DashboardMetrics> {
     const [disciplines, zones, priorities, statuses] = await Promise.all([
-      this.prisma.discipline.findMany({ where: { projectId: project.id } }),
-      this.prisma.zone.findMany({ where: { projectId: project.id } }),
+      this.prisma.discipline.findMany({ where: { projectId } }),
+      this.prisma.zone.findMany({ where: { projectId } }),
       this.prisma.priority.findMany(),
       this.prisma.status.findMany(),
     ]);
@@ -197,7 +203,7 @@ export class ClashesService {
 
     const clashes = await this.prisma.clash.findMany({
       where: {
-        projectId: project.id,
+        projectId,
         createdAt: { ...(start ? { gte: start } : {}), lte: end },
       },
       select: {
@@ -295,9 +301,8 @@ export class ClashesService {
     return source.map((s) => ({ id: s.id, label: s.label, value: counts.get(s.id) ?? 0 }));
   }
 
-  async findDetail(id: string) {
-    const clash = await this.prisma.clash.findUnique({ where: { id } });
-    if (!clash) throw new NotFoundException('Clash tidak ditemukan.');
+  async findDetail(id: string, projectId: string) {
+    const clash = await this.assertClashInProject(id, projectId);
 
     const [comments, auditLogs, attachments] = await Promise.all([
       this.prisma.comment.findMany({ where: { clashId: id }, orderBy: { createdAt: 'asc' } }),
@@ -310,9 +315,13 @@ export class ClashesService {
 
   // --- Attachments ---------------------------------------------------------------
 
-  async addAttachments(clashId: string, files: Express.Multer.File[], user: AuthUser) {
-    const clash = await this.prisma.clash.findUnique({ where: { id: clashId } });
-    if (!clash) throw new NotFoundException('Clash tidak ditemukan.');
+  async addAttachments(
+    clashId: string,
+    files: Express.Multer.File[],
+    user: AuthUser,
+    projectId: string,
+  ) {
+    const clash = await this.assertClashInProject(clashId, projectId);
 
     const created = [];
     for (const file of files) {
@@ -334,41 +343,27 @@ export class ClashesService {
   }
 
   /**
-   * `ProjectMemberGuard` exists but is never wired to this route (or any
-   * route — it's dead code today, see AllExceptionsFilter's neighbor
-   * common/guards/project-member.guard.ts): its design expects a
-   * `:projectId` route param, which resource-nested routes like this one
-   * don't have (`:clashId`/`:attachmentId` only). Without this check, any
-   * authenticated user of any role could download any attachment on any
-   * clash, regardless of project membership. Checked here directly instead.
+   * ProjectContextGuard already confirmed the caller may use `projectId`;
+   * this just confirms the clash/attachment pair actually belongs to it, so
+   * membership on Project A can't be used to pull an attachment id guessed
+   * or observed from Project B.
    */
-  async getAttachmentForDownload(clashId: string, attachmentId: string, user: AuthUser) {
+  async getAttachmentForDownload(clashId: string, attachmentId: string, user: AuthUser, projectId: string) {
+    await this.assertClashInProject(clashId, projectId);
+
     const attachment = await this.prisma.attachment.findUnique({ where: { id: attachmentId } });
     if (!attachment || attachment.clashId !== clashId) {
       throw new NotFoundException('Lampiran tidak ditemukan.');
     }
 
-    await this.assertProjectMember(user);
-
     return { attachment, stream: this.storage.readStream(attachment.fileUrl) };
-  }
-
-  private async assertProjectMember(user: AuthUser): Promise<void> {
-    if (user.role === Role.ADMIN) return;
-
-    const project = await this.currentProject();
-    const membership = await this.prisma.projectMember.findUnique({
-      where: { projectId_userId: { projectId: project.id, userId: user.id } },
-    });
-    if (!membership) {
-      throw new ForbiddenException('Anda bukan anggota proyek ini.');
-    }
   }
 
   // --- Create ------------------------------------------------------------------
 
-  async create(dto: CreateClashDto, user: AuthUser) {
-    const project = await this.currentProject();
+  async create(dto: CreateClashDto, user: AuthUser, projectId: string) {
+    const project = await this.prisma.project.findUnique({ where: { id: projectId } });
+    if (!project) throw new NotFoundException('Proyek tidak ditemukan.');
 
     const [discipline, zone, priority, openStatus] = await Promise.all([
       this.prisma.discipline.findUnique({ where: { id: dto.disciplineId } }),
@@ -474,9 +469,8 @@ export class ClashesService {
 
   // --- Update ------------------------------------------------------------------
 
-  async update(id: string, dto: UpdateClashDto, user: AuthUser) {
-    const clash = await this.prisma.clash.findUnique({ where: { id } });
-    if (!clash) throw new NotFoundException('Clash tidak ditemukan.');
+  async update(id: string, dto: UpdateClashDto, user: AuthUser, projectId: string) {
+    const clash = await this.assertClashInProject(id, projectId);
 
     this.assertCanEdit(user, clash.assigneeId, clash.reporterId);
     const patch = await this.buildAllowedPatch(user, clash, dto);
@@ -485,15 +479,26 @@ export class ClashesService {
     return updated ?? clash;
   }
 
-  async bulkUpdate(dto: BulkUpdateClashDto, user: AuthUser) {
+  async bulkUpdate(dto: BulkUpdateClashDto, user: AuthUser, projectId: string) {
     // Reached only by Coordinator/Admin (enforced by @Roles on the route),
     // who may edit any clash and any field — no per-item RBAC needed here.
+    // Every id must belong to the active project: reject the whole batch
+    // rather than silently skipping ids from another project, so a caller
+    // can't use a partial 200 to probe which foreign ids exist.
+    const clashes = await this.prisma.clash.findMany({ where: { id: { in: dto.ids }, projectId } });
+    if (clashes.length !== dto.ids.length) {
+      throw new NotFoundException('Satu atau lebih clash tidak ditemukan.');
+    }
+
+    // bulkUpdate never goes through buildAllowedPatch, so the assignee/Engineer
+    // rule has to be enforced here explicitly. Checked once up front (not
+    // per-item) so a bad assigneeId rejects the whole batch, not half of it.
+    if (dto.patch.assigneeId !== undefined) {
+      await this.assertAssigneeIsEngineer(dto.patch.assigneeId);
+    }
+
     let updated = 0;
-
-    for (const id of dto.ids) {
-      const clash = await this.prisma.clash.findUnique({ where: { id } });
-      if (!clash) continue;
-
+    for (const clash of clashes) {
       const result = await this.applyPatch(clash, dto.patch, user.id);
       if (result) updated++;
     }
@@ -503,9 +508,8 @@ export class ClashesService {
 
   // --- Comments ------------------------------------------------------------------
 
-  async addComment(clashId: string, dto: CreateCommentDto, user: AuthUser) {
-    const clash = await this.prisma.clash.findUnique({ where: { id: clashId } });
-    if (!clash) throw new NotFoundException('Clash tidak ditemukan.');
+  async addComment(clashId: string, dto: CreateCommentDto, user: AuthUser, projectId: string) {
+    await this.assertClashInProject(clashId, projectId);
 
     return this.prisma.comment.create({
       data: { clashId, authorId: user.id, content: dto.content.trim() },
@@ -521,10 +525,12 @@ export class ClashesService {
   }
 
   /**
-   * Coordinator/Admin may set any of the four fields. An Engineer may only
-   * move status, and only one step forward into a non-closed state — never
-   * reassign, reprioritise, or change the due date (the frontend never shows
-   * those controls to them; this is the actual enforcement).
+   * Coordinator/Admin may set any of the four fields, but assigneeId is
+   * further restricted to active Engineers (or null, to unassign). An
+   * Engineer may only move status, and only one step forward into a
+   * non-closed state — never reassign, reprioritise, or change the due date
+   * (the frontend never shows those controls to them; this is the actual
+   * enforcement).
    */
   private async buildAllowedPatch(
     user: AuthUser,
@@ -534,6 +540,9 @@ export class ClashesService {
     if (user.role === Role.COORDINATOR || user.role === Role.ADMIN) {
       if (dto.statusId !== undefined && dto.statusId !== clash.statusId) {
         await this.assertStatusExists(dto.statusId);
+      }
+      if (dto.assigneeId !== undefined) {
+        await this.assertAssigneeIsEngineer(dto.assigneeId);
       }
       return {
         statusId: dto.statusId,
@@ -558,6 +567,15 @@ export class ClashesService {
   private async assertStatusExists(statusId: string) {
     const status = await this.prisma.status.findUnique({ where: { id: statusId } });
     if (!status) throw new BadRequestException('Status tidak valid.');
+  }
+
+  /** Unassigning (null/undefined) always passes. Assigning requires an active Engineer. */
+  private async assertAssigneeIsEngineer(assigneeId: string | null | undefined) {
+    if (assigneeId === null || assigneeId === undefined) return;
+    const assignee = await this.prisma.user.findUnique({ where: { id: assigneeId } });
+    if (!assignee || assignee.role !== Role.ENGINEER || !assignee.isActive) {
+      throw new BadRequestException('Assignee harus Engineer yang aktif.');
+    }
   }
 
   private async assertEngineerStatusTransition(currentId: string, nextId: string) {
@@ -611,8 +629,9 @@ export class ClashesService {
     };
 
     const nowIso = new Date();
-    // Unchecked update: every field here is a scalar FK we've already
-    // validated exists, so bypassing the relation-connect ceremony is safe.
+    // Unchecked update: every field here is a scalar FK already validated
+    // by the caller (buildAllowedPatch / bulkUpdate), so bypassing the
+    // relation-connect ceremony is safe.
     const data: Prisma.ClashUncheckedUpdateInput = {};
     const auditRows: Prisma.AuditLogCreateManyInput[] = [];
 

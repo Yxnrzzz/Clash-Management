@@ -1,4 +1,4 @@
-import type { Clash, Role } from "./types";
+import type { Clash, Role, User } from "./types";
 
 export function formatDate(iso: string | null) {
   if (!iso) return "-";
@@ -37,4 +37,8 @@ export function canComment(role: Role) {
 
 export function isAdmin(role: Role) {
   return role === "Admin";
+}
+
+export function isAssignable(user: User) {
+  return user.isActive && user.peran === "Engineer";
 }

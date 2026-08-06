@@ -64,7 +64,9 @@ export class CreateClashDto {
  * triage fields. All four are optional here — ClashesService decides per
  * field whether the caller's role may touch it, since that can't be
  * expressed with @Roles() alone (Engineer may move status but never
- * reassign, Coordinator/Admin may do both).
+ * reassign, Coordinator/Admin may do both). assigneeId is further
+ * restricted to active Engineers (or null) regardless of caller role —
+ * see ClashesService.assertAssigneeIsEngineer().
  */
 export class UpdateClashDto {
   @IsOptional()

@@ -82,6 +82,7 @@ describe('ImportService.commit — autoCreateMasterData gate', () => {
       service.commit(
         { token: 'imports/x.csv', fileName: 'x.csv', mapping: VALID_MAPPING, autoCreateMasterData: true },
         coordinator,
+        PROJECT.id,
       ),
     ).rejects.toThrow(ForbiddenException);
   });
@@ -92,10 +93,16 @@ describe('ImportService.commit — autoCreateMasterData gate', () => {
     const result = await service.commit(
       { token: 'imports/x.csv', fileName: 'x.csv', mapping: VALID_MAPPING, autoCreateMasterData: true },
       admin,
+      PROJECT.id,
     );
 
     expect(importJobCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ autoCreate: true, createdById: admin.id, totalRows: 1 }),
+      data: expect.objectContaining({
+        autoCreate: true,
+        createdById: admin.id,
+        totalRows: 1,
+        projectId: PROJECT.id,
+      }),
     });
     expect(queueAdd).toHaveBeenCalledWith('process', { jobId: 'job-1' });
     expect(result).toEqual({ jobId: 'job-1' });
@@ -107,6 +114,7 @@ describe('ImportService.commit — autoCreateMasterData gate', () => {
     const result = await service.commit(
       { token: 'imports/x.csv', fileName: 'x.csv', mapping: VALID_MAPPING },
       coordinator,
+      PROJECT.id,
     );
 
     expect(importJobCreate).toHaveBeenCalledWith({
@@ -119,7 +127,7 @@ describe('ImportService.commit — autoCreateMasterData gate', () => {
     const { service } = makeHarness({ storedFileText: 'judul,disiplin' });
 
     await expect(
-      service.commit({ token: 'imports/x.csv', fileName: 'x.csv', mapping: VALID_MAPPING }, admin),
+      service.commit({ token: 'imports/x.csv', fileName: 'x.csv', mapping: VALID_MAPPING }, admin, PROJECT.id),
     ).rejects.toThrow(BadRequestException);
   });
 });

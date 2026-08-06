@@ -202,7 +202,7 @@ export default function ImportPage() {
               <p className="mb-2 text-xs font-medium text-zinc-600">Contoh format CSV:</p>
               <pre className="overflow-x-auto rounded-lg bg-zinc-50 p-3 text-xs text-zinc-600">{SAMPLE_CSV}</pre>
               <button
-                onClick={() => downloadText(SAMPLE_CSV, "contoh-import-clashhub.csv", "text/csv")}
+                onClick={() => downloadText(SAMPLE_CSV, "contoh-import-eps-workspace.csv", "text/csv")}
                 className="mt-2 text-xs font-medium text-zinc-500 hover:text-zinc-900 hover:underline"
               >
                 Unduh contoh CSV ini
@@ -212,7 +212,7 @@ export default function ImportPage() {
               <p className="mb-2 text-xs font-medium text-zinc-600">Contoh format XML (Navisworks):</p>
               <pre className="overflow-x-auto rounded-lg bg-zinc-50 p-3 text-xs text-zinc-600">{SAMPLE_XML}</pre>
               <button
-                onClick={() => downloadText(SAMPLE_XML, "contoh-import-clashhub.xml", "application/xml")}
+                onClick={() => downloadText(SAMPLE_XML, "contoh-import-eps-workspace.xml", "application/xml")}
                 className="mt-2 text-xs font-medium text-zinc-500 hover:text-zinc-900 hover:underline"
               >
                 Unduh contoh XML ini

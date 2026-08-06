@@ -62,7 +62,7 @@ const Y_TICK = { ...AXIS_TICK, style: { fontVariantNumeric: "tabular-nums" as co
 
 export function DashboardView() {
   const { user, isLoading } = useRequireAuth();
-  const { project, statuses } = useData();
+  const { project, projects, setActiveProject, statuses } = useData();
   const router = useRouter();
 
   const openStatusQuery = useMemo(
@@ -127,7 +127,7 @@ export function DashboardView() {
       cancelled = true;
       clearTimeout(timeout);
     };
-  }, [filters]);
+  }, [filters, project.id]);
 
   const drillTo = useCallback(
     (key: string) => (entry: unknown) => {
@@ -187,12 +187,15 @@ export function DashboardView() {
           </label>
           <select
             value={project.id}
-            disabled
+            disabled={projects.length <= 1}
+            onChange={(e) => void setActiveProject(e.target.value)}
             className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-700 disabled:opacity-70"
           >
-            <option value={project.id}>
-              {project.kode} — {project.nama}
-            </option>
+            {(projects.length > 0 ? projects : [project]).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.kode} — {p.nama}
+              </option>
+            ))}
           </select>
         </div>
 

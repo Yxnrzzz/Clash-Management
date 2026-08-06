@@ -16,6 +16,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { ImportModule } from './import/import.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
+import { ProjectContextGuard } from './common/guards/project-context.guard';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { envValidationSchema } from './config/env.validation';
 
@@ -71,11 +72,13 @@ import { envValidationSchema } from './config/env.validation';
   ],
   providers: [
     // Order matters: JwtAuthGuard must populate request.user before RolesGuard
-    // reads the role off it. ThrottlerGuard runs first since it doesn't
-    // depend on either.
+    // reads the role off it, and ProjectContextGuard needs the role to decide
+    // whether membership is required. ThrottlerGuard runs first since it
+    // doesn't depend on any of them.
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    { provide: APP_GUARD, useClass: ProjectContextGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
 })

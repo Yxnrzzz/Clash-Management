@@ -21,6 +21,14 @@ export interface ApiProject {
   code: string;
 }
 
+export interface ApiProjectMember {
+  userId: string;
+  name: string;
+  email: string;
+  projectRole: string;
+  joinedAt: string;
+}
+
 export interface ApiDiscipline {
   id: string;
   projectId: string;

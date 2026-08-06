@@ -86,12 +86,18 @@ async function main() {
     prisma.priority.findMany(),
     prisma.discipline.findMany({ where: { projectId: project.id, isActive: true } }),
     prisma.zone.findMany({ where: { projectId: project.id, isActive: true } }),
-    prisma.projectMember.findMany({ where: { projectId: project.id } }),
+    prisma.projectMember.findMany({ where: { projectId: project.id }, include: { user: true } }),
   ]);
   if (!statuses.length || !priorities.length || !disciplines.length || !zones.length || !members.length) {
     throw new Error('Master data proyek kosong — jalankan `npm run prisma:seed` dulu.');
   }
   const userIds = members.map((m) => m.userId);
+  // Assignee is restricted to active Engineers server-side (ClashesService.assertAssigneeIsEngineer) —
+  // mirror that here so seeded rows don't get nulled out by that same validation.
+  const engineerIds = members.filter((m) => m.user.role === 'ENGINEER' && m.user.isActive).map((m) => m.userId);
+  if (!engineerIds.length) {
+    throw new Error('Tidak ada Engineer aktif di proyek — tidak bisa membuat assignee.');
+  }
 
   const rng = mulberry32(1337);
   const now = new Date();
@@ -109,7 +115,7 @@ async function main() {
       const priority = pick(rng, priorities);
       const status = pick(rng, statuses);
       const reporterId = pick(rng, userIds);
-      const assigneeId = rng() < 0.9 ? pick(rng, userIds) : null;
+      const assigneeId = rng() < 0.9 ? pick(rng, engineerIds) : null;
       const createdAt = addDays(now, -Math.floor(rng() * 180));
       const dueDate = rng() < 0.85 ? addDays(createdAt, 5 + Math.floor(rng() * 25)) : null;
       const closedAt = status.isClosedState ? addDays(createdAt, 3 + Math.floor(rng() * 20)) : null;

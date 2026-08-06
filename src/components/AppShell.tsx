@@ -15,7 +15,7 @@ const ROLE_LABEL: Record<string, string> = {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
-  const { project, syncError } = useData();
+  const { project, projects, setActiveProject, syncError } = useData();
   const pathname = usePathname();
   const router = useRouter();
 
@@ -42,11 +42,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-200 bg-white">
         <div className="flex h-16 items-center gap-2 border-b border-zinc-200 px-5">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg">
-            <Image src="/logo.png" alt="ClashHub logo" width={36} height={36} className="h-full w-full object-contain" />
+            <Image src="/logo.png" alt="EPS Workspace logo" width={36} height={36} className="h-full w-full object-contain" />
           </div>
-          <div>
-            <p className="text-sm font-semibold leading-none">ClashHub</p>
-            <p className="text-xs text-zinc-500">{project.nama}</p>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold leading-none">EPS Workspace</p>
+            {projects.length > 1 ? (
+              <select
+                aria-label="Proyek aktif"
+                value={project.id}
+                onChange={(e) => void setActiveProject(e.target.value)}
+                className="mt-1 w-full truncate rounded border-none bg-transparent p-0 text-xs text-zinc-500 outline-none focus:ring-1 focus:ring-zinc-300"
+              >
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.kode} — {p.nama}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p className="truncate text-xs text-zinc-500">{project.nama || "Belum ada proyek"}</p>
+            )}
           </div>
         </div>
         <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
