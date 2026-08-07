@@ -65,4 +65,27 @@ export class StorageService {
   readStream(key: string): ReadStream {
     return createReadStream(path.join(this.root, key));
   }
+
+  /**
+   * The key is never client-supplied — the only caller passes
+   * attachment.fileUrl, read from a row that the service layer already
+   * proved belongs to the clash/project in question. The traversal check
+   * below is defence-in-depth against a corrupted DB row, not the primary
+   * access control.
+   */
+  async delete(key: string): Promise<void> {
+    if (!key) return;
+
+    const absolute = path.resolve(this.root, key);
+    // path.resolve collapses "..", so a key like "../../etc/passwd" lands
+    // outside root and is rejected here rather than unlinked.
+    if (absolute !== this.root && !absolute.startsWith(this.root + path.sep)) {
+      throw new Error('Kunci penyimpanan tidak valid.');
+    }
+
+    // force: true — a missing file (already deleted, or never written) is a
+    // no-op, not an error. No `recursive`: if a key somehow resolved to a
+    // directory, fs.rm throws here rather than wiping it.
+    await fs.rm(absolute, { force: true });
+  }
 }

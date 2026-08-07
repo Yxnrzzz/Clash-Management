@@ -86,6 +86,7 @@ export interface Clash {
   dueDate: string | null;
   createdAt: string;
   closedAt: string | null;
+  deletedAt: string | null;
 }
 
 export interface NewClashInput {

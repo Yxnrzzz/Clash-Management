@@ -14,7 +14,9 @@ import type {
   Zone,
 } from "../types";
 import { WEEK_LABEL, type DashboardMetrics } from "../dashboard-metrics";
+import type { Annotation, Geometry } from "../annotations";
 import type {
+  ApiAnnotation,
   ApiAttachment,
   ApiAuditLog,
   ApiClash,
@@ -145,6 +147,7 @@ export const toClash = (c: ApiClash): Clash => ({
   dueDate: c.dueDate,
   createdAt: c.createdAt,
   closedAt: c.closedAt,
+  deletedAt: c.deletedAt,
 });
 
 export const toComment = (c: ApiComment): Comment => ({
@@ -174,6 +177,38 @@ export const toAttachment = (a: ApiAttachment): Attachment => ({
   ukuranBytes: a.sizeBytes,
   uploadedBy: a.uploadedById,
   createdAt: a.createdAt,
+});
+
+export const toAnnotation = (a: ApiAnnotation): Annotation => ({
+  id: a.id,
+  attachmentId: a.attachmentId,
+  pageNumber: a.pageNumber,
+  authorId: a.authorId,
+  kind: a.kind,
+  geometry: a.geometry as unknown as Geometry,
+  color: a.color,
+  strokeWidth: a.strokeWidth,
+  text: a.text,
+  createdAt: a.createdAt,
+  updatedAt: a.updatedAt,
+});
+
+/** Request payload for POST/PATCH .../annotations — geometry is sent as-is
+ * (already normalized [0,1] by the caller). */
+export const annotationPayload = (input: {
+  kind?: Annotation["kind"];
+  pageNumber?: number;
+  geometry?: Geometry;
+  color?: string;
+  strokeWidth?: number;
+  text?: string;
+}) => ({
+  ...(input.kind !== undefined ? { kind: input.kind } : {}),
+  ...(input.pageNumber !== undefined ? { pageNumber: input.pageNumber } : {}),
+  ...(input.geometry !== undefined ? { geometry: input.geometry } : {}),
+  ...(input.color !== undefined ? { color: input.color } : {}),
+  ...(input.strokeWidth !== undefined ? { strokeWidth: input.strokeWidth } : {}),
+  ...(input.text !== undefined ? { text: input.text } : {}),
 });
 
 export const newClashPayload = (input: Omit<NewClashInput, "attachments">) => ({

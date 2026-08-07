@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthUser } from '../auth/auth.types';
+import { NOT_DELETED } from './clash-scope';
 import {
   BulkUpdateClashDto,
   CreateClashDto,
@@ -88,9 +89,19 @@ export class ClashesService {
    * A clash that exists but belongs to a different project is reported as
    * NotFound, not Forbidden, so callers can't use this to probe which ids
    * exist in projects they aren't scoped into.
+   *
+   * Soft-deleted clashes are excluded by default (404, same as a genuinely
+   * missing id) — pass `includeDeleted: true` only from restore(), the one
+   * place that legitimately needs to load a deleted row.
    */
-  private async assertClashInProject(clashId: string, projectId: string) {
-    const clash = await this.prisma.clash.findUnique({ where: { id: clashId } });
+  private async assertClashInProject(
+    clashId: string,
+    projectId: string,
+    opts?: { includeDeleted?: boolean },
+  ) {
+    const clash = await this.prisma.clash.findFirst({
+      where: { id: clashId, ...(opts?.includeDeleted ? {} : NOT_DELETED) },
+    });
     if (!clash || clash.projectId !== projectId) {
       throw new NotFoundException('Clash tidak ditemukan.');
     }
@@ -104,8 +115,15 @@ export class ClashesService {
    * for the param shape this mirrors. pageSize can go up to 10000 (see the
    * DTO), which is what lets the Register's export buttons reuse this same
    * method (page=1&pageSize=10000) instead of a separate unpaginated route.
+   *
+   * `query.deleted` switches from the normal (non-deleted) list to the
+   * trash bin — Admin only, since it's the only role that can restore.
    */
-  async list(query: ListClashesQueryDto, projectId: string) {
+  async list(query: ListClashesQueryDto, projectId: string, user: AuthUser) {
+    if (query.deleted && user.role !== Role.ADMIN) {
+      throw new ForbiddenException('Hanya Admin yang dapat melihat clash yang terhapus.');
+    }
+
     const where = this.buildListWhere(projectId, query);
     const orderBy = this.buildListOrderBy(query.sort, query.dir);
 
@@ -123,7 +141,10 @@ export class ClashesService {
   }
 
   private buildListWhere(projectId: string, query: ListClashesQueryDto): Prisma.ClashWhereInput {
-    const where: Prisma.ClashWhereInput = { projectId };
+    const where: Prisma.ClashWhereInput = {
+      projectId,
+      ...(query.deleted ? { deletedAt: { not: null } } : NOT_DELETED),
+    };
 
     if (query.disc?.length) where.disciplineId = { in: query.disc };
     if (query.stat?.length) where.statusId = { in: query.stat };
@@ -204,6 +225,7 @@ export class ClashesService {
     const clashes = await this.prisma.clash.findMany({
       where: {
         projectId,
+        ...NOT_DELETED,
         createdAt: { ...(start ? { gte: start } : {}), lte: end },
       },
       select: {
@@ -315,6 +337,13 @@ export class ClashesService {
 
   // --- Attachments ---------------------------------------------------------------
 
+  /**
+   * Reachable from any clash's detail page, not just at creation time —
+   * ENGINEER/COORDINATOR/ADMIN may attach files to any clash in their
+   * project. Deliberately does NOT call assertCanEdit(): unlike editing the
+   * clash's own fields, adding evidence isn't restricted to the
+   * assignee/reporter (see the PRD's attachment permission matrix).
+   */
   async addAttachments(
     clashId: string,
     files: Express.Multer.File[],
@@ -326,8 +355,8 @@ export class ClashesService {
     const created = [];
     for (const file of files) {
       const { key } = await this.storage.save(file.buffer, clash.id, file.originalname);
-      created.push(
-        await this.prisma.attachment.create({
+      const attachment = await this.prisma.$transaction(async (tx) => {
+        const row = await tx.attachment.create({
           data: {
             clashId: clash.id,
             fileName: file.originalname,
@@ -336,8 +365,19 @@ export class ClashesService {
             sizeBytes: file.size,
             uploadedById: user.id,
           },
-        }),
-      );
+        });
+        await tx.auditLog.create({
+          data: {
+            clashId: clash.id,
+            actorId: user.id,
+            action: 'attachment_added',
+            field: 'attachment',
+            newValue: file.originalname,
+          },
+        });
+        return row;
+      });
+      created.push(attachment);
     }
     return created;
   }
@@ -346,9 +386,10 @@ export class ClashesService {
    * ProjectContextGuard already confirmed the caller may use `projectId`;
    * this just confirms the clash/attachment pair actually belongs to it, so
    * membership on Project A can't be used to pull an attachment id guessed
-   * or observed from Project B.
+   * or observed from Project B. Public so AnnotationsService can reuse it
+   * for the same scoping check rather than duplicating it.
    */
-  private async assertAttachmentInClash(clashId: string, attachmentId: string, projectId: string) {
+  async assertAttachmentInClash(clashId: string, attachmentId: string, projectId: string) {
     await this.assertClashInProject(clashId, projectId);
 
     const attachment = await this.prisma.attachment.findUnique({ where: { id: attachmentId } });
@@ -361,6 +402,49 @@ export class ClashesService {
   async getAttachmentForDownload(clashId: string, attachmentId: string, user: AuthUser, projectId: string) {
     const attachment = await this.assertAttachmentInClash(clashId, attachmentId, projectId);
     return { attachment, stream: this.storage.readStream(attachment.fileUrl) };
+  }
+
+  /**
+   * ENGINEER may delete only their own upload; COORDINATOR/ADMIN may delete
+   * anyone's — keyed on uploadedById, not assignee/reporter, so this is a
+   * distinct rule from assertCanEdit(). The DB row is hard-deleted (no
+   * deletedAt column on Attachment — see clashes.service.ts's Clash
+   * soft-delete for why that's a different situation): its only historical
+   * value is the filename, which the AuditLog row preserves. The on-disk
+   * file is unlinked after the transaction commits, fire-and-forget, so a
+   * storage hiccup never leaves the DB and disk disagreeing about whether
+   * the request "succeeded" — an orphaned file is harmless; a deleted row
+   * whose request 500s is not.
+   */
+  async deleteAttachment(clashId: string, attachmentId: string, user: AuthUser, projectId: string) {
+    const attachment = await this.assertAttachmentInClash(clashId, attachmentId, projectId);
+    this.assertCanDeleteAttachment(user, attachment.uploadedById);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.annotation.deleteMany({ where: { attachmentId: attachment.id } });
+      await tx.attachment.delete({ where: { id: attachment.id } });
+      await tx.auditLog.create({
+        data: {
+          clashId,
+          actorId: user.id,
+          action: 'attachment_deleted',
+          field: 'attachment',
+          oldValue: attachment.fileName,
+        },
+      });
+    });
+
+    this.storage
+      .delete(attachment.fileUrl)
+      .catch((error: Error) => this.logger.warn(`Gagal menghapus file lampiran: ${error.message}`));
+
+    return { id: attachment.id };
+  }
+
+  private assertCanDeleteAttachment(user: AuthUser, uploadedById: string) {
+    if (user.role === Role.COORDINATOR || user.role === Role.ADMIN) return;
+    if (user.role === Role.ENGINEER && uploadedById === user.id) return;
+    throw new ForbiddenException('Anda hanya dapat menghapus lampiran yang Anda unggah.');
   }
 
   /**
@@ -472,6 +556,11 @@ export class ClashesService {
     const auditAction = input.auditAction ?? 'created';
 
     for (let attempt = 0; attempt < 2; attempt++) {
+      // Deliberately NOT filtered by NOT_DELETED: a soft-deleted clash keeps
+      // its uniqueCode forever (see the Clash.deletedAt doc comment), so
+      // excluding deleted rows here would regenerate an already-taken code,
+      // the P2002 retry below would recompute the same count, and creation
+      // would hard-fail after two attempts.
       const count = await this.prisma.clash.count({ where: { disciplineId: input.discipline.id } });
       const uniqueCode = `${input.project.code}-${input.discipline.code}-${String(count + 1).padStart(4, '0')}`;
 
@@ -533,7 +622,9 @@ export class ClashesService {
     // Every id must belong to the active project: reject the whole batch
     // rather than silently skipping ids from another project, so a caller
     // can't use a partial 200 to probe which foreign ids exist.
-    const clashes = await this.prisma.clash.findMany({ where: { id: { in: dto.ids }, projectId } });
+    const clashes = await this.prisma.clash.findMany({
+      where: { id: { in: dto.ids }, projectId, ...NOT_DELETED },
+    });
     if (clashes.length !== dto.ids.length) {
       throw new NotFoundException('Satu atau lebih clash tidak ditemukan.');
     }
@@ -561,6 +652,39 @@ export class ClashesService {
 
     return this.prisma.comment.create({
       data: { clashId, authorId: user.id, content: dto.content.trim() },
+    });
+  }
+
+  // --- Delete / restore ---------------------------------------------------------
+
+  /**
+   * Admin-only soft delete: sets deletedAt so the clash drops out of every
+   * read path (list/metrics/bulkUpdate/detail/comments/attachments), while
+   * the row itself, its comments, audit log, and attachment files are left
+   * untouched — restore() reverses this exactly. uniqueCode is never freed,
+   * so a re-import of the same externalId stays "skipped" until restored
+   * (see the comment in ImportProcessor.importRow).
+   */
+  async softDelete(id: string, user: AuthUser, projectId: string) {
+    await this.assertClashInProject(id, projectId);
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.clash.update({ where: { id }, data: { deletedAt: new Date() } });
+      await tx.auditLog.create({ data: { clashId: id, actorId: user.id, action: 'deleted' } });
+      return updated;
+    });
+  }
+
+  async restore(id: string, user: AuthUser, projectId: string) {
+    const clash = await this.assertClashInProject(id, projectId, { includeDeleted: true });
+    if (!clash.deletedAt) {
+      throw new BadRequestException('Clash ini tidak dalam status terhapus.');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.clash.update({ where: { id }, data: { deletedAt: null } });
+      await tx.auditLog.create({ data: { clashId: id, actorId: user.id, action: 'restored' } });
+      return updated;
     });
   }
 

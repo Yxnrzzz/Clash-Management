@@ -196,6 +196,11 @@ export class ListClashesQueryDto {
   @Transform(({ value }) => value === '1' || value === 'true')
   overdue?: boolean;
 
+  // Trash bin view — Admin only, enforced in ClashesService.list().
+  @IsOptional()
+  @Transform(({ value }) => value === '1' || value === 'true')
+  deleted?: boolean;
+
   @IsOptional()
   @IsIn(SORTABLE_FIELDS, { message: 'Field sort tidak valid' })
   sort: (typeof SORTABLE_FIELDS)[number] = 'createdAt';

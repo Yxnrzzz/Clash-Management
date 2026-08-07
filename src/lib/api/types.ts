@@ -79,6 +79,7 @@ export interface ApiClash {
   dueDate: string | null;
   createdAt: string;
   closedAt: string | null;
+  deletedAt: string | null;
 }
 
 export interface ApiComment {
@@ -108,6 +109,22 @@ export interface ApiAttachment {
   sizeBytes: number;
   uploadedById: string;
   createdAt: string;
+}
+
+export type ApiAnnotationKind = "RECT" | "ARROW" | "FREEHAND" | "TEXT";
+
+export interface ApiAnnotation {
+  id: string;
+  attachmentId: string;
+  pageNumber: number;
+  authorId: string;
+  kind: ApiAnnotationKind;
+  geometry: Record<string, unknown>;
+  color: string;
+  strokeWidth: number;
+  text: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ApiClashDetail extends ApiClash {

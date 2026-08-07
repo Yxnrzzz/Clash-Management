@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/copy-pdf-worker.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/copy-pdf-worker.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -15,6 +17,7 @@
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
     "next": "16.2.12",
+    "pdfjs-dist": "6.2.108",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "recharts": "^3.10.1",

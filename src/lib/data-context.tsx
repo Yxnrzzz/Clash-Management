@@ -9,7 +9,14 @@ import {
   useRef,
   useState,
 } from "react";
-import { apiGet, apiPatch, apiPost, apiUpload, setActiveProjectId } from "./api/client";
+import {
+  apiDelete,
+  apiGet,
+  apiPatch,
+  apiPost,
+  apiUpload,
+  setActiveProjectId,
+} from "./api/client";
 import {
   disciplinePayload,
   newClashPayload,
@@ -147,6 +154,16 @@ interface DataContextValue extends MasterState {
     actorId: string
   ) => Promise<{ updated: number }>;
   addComment: (clashId: string, authorId: string, isi: string) => Promise<void>;
+  /** Admin-only soft delete — the row, comments, audit log, and attachment
+   * files all stay intact server-side; this just drops it from the local
+   * on-demand cache so it disappears from the UI immediately. */
+  deleteClash: (clashId: string) => Promise<void>;
+  /** Uploads to an existing clash from its detail page — unlike createClash's
+   * staged files, these go straight to the server. Reloads clash detail
+   * afterward so the new attachment_added audit rows show up in Riwayat. */
+  uploadAttachments: (clashId: string, files: File[]) => Promise<void>;
+  /** Hard-deletes one attachment (server-side: DB row + on-disk file). */
+  deleteAttachment: (clashId: string, attachmentId: string) => Promise<void>;
 
   /** Admin-only — creates the project and switches to it immediately (it
    * starts with no disciplines/zones/members for the admin to set up next). */
@@ -435,6 +452,55 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       );
     },
     [patchMaster, runWrite]
+  );
+
+  const deleteClash = useCallback(
+    async (clashId: string): Promise<void> => {
+      await runWrite(
+        () => apiDelete<ApiClash>(`/clashes/${clashId}`),
+        () =>
+          patchMaster((prev) => {
+            const { [clashId]: _removed, ...rest } = prev.clashesById;
+            void _removed;
+            return { ...prev, clashesById: rest };
+          })
+      );
+    },
+    [patchMaster, runWrite]
+  );
+
+  const uploadAttachments = useCallback(
+    async (clashId: string, files: File[]): Promise<void> => {
+      const formData = new FormData();
+      for (const file of files) formData.append("files", file);
+      await runWrite(
+        () => apiUpload<ApiAttachment[]>(`/clashes/${clashId}/attachments`, formData),
+        (createdAttachments) =>
+          patchMaster((prev) => ({
+            ...prev,
+            attachments: mergeById(prev.attachments, createdAttachments.map(toAttachment)),
+          }))
+      );
+      // The upload response doesn't include the attachment_added AuditLog
+      // rows it wrote — same reasoning as updateClashField's follow-up fetch.
+      await loadClashDetail(clashId);
+    },
+    [patchMaster, runWrite, loadClashDetail]
+  );
+
+  const deleteAttachment = useCallback(
+    async (clashId: string, attachmentId: string): Promise<void> => {
+      await runWrite(
+        () => apiDelete<{ id: string }>(`/clashes/${clashId}/attachments/${attachmentId}`),
+        () =>
+          patchMaster((prev) => ({
+            ...prev,
+            attachments: prev.attachments.filter((a) => a.id !== attachmentId),
+          }))
+      );
+      await loadClashDetail(clashId);
+    },
+    [patchMaster, runWrite, loadClashDetail]
   );
 
   // --- Project --------------------------------------------------------------
@@ -742,6 +808,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       updateClashField,
       bulkUpdateClashes,
       addComment,
+      deleteClash,
+      uploadAttachments,
+      deleteAttachment,
       createProject,
       updateProject,
       createUser,
@@ -771,6 +840,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       updateClashField,
       bulkUpdateClashes,
       addComment,
+      deleteClash,
+      uploadAttachments,
+      deleteAttachment,
       createProject,
       updateProject,
       createUser,

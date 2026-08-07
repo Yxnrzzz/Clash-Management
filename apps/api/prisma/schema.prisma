@@ -32,6 +32,13 @@ enum ImportJobStatus {
   FAILED
 }
 
+enum AnnotationKind {
+  RECT
+  ARROW
+  FREEHAND
+  TEXT
+}
+
 model User {
   id           String   @id @default(uuid())
   name         String
@@ -57,6 +64,7 @@ model User {
   notifications           Notification[]
   notificationPreference  NotificationPreference?
   importJobs              ImportJob[]
+  annotations             Annotation[]
 }
 
 model Project {
@@ -148,6 +156,13 @@ model Clash {
   // without colliding, while an imported row with a given external id can
   // never be created twice in the same project (see ImportProcessor).
   externalId   String?
+  // Soft delete (Admin only). Null = visible everywhere. A nullable
+  // timestamp rather than an `isActive` boolean like Discipline/Zone/Priority:
+  // those mean "retired from new selection, still visible in history" (a
+  // deactivated discipline still renders in the Register's filter chips),
+  // which is a different concept from "hidden everywhere". uniqueCode is
+  // never freed on delete — restore must be lossless.
+  deletedAt    DateTime?
 
   project    Project    @relation(fields: [projectId], references: [id])
   discipline Discipline @relation(fields: [disciplineId], references: [id])
@@ -169,6 +184,7 @@ model Clash {
   @@index([projectId, statusId])
   @@index([projectId, assigneeId])
   @@index([projectId, dueDate])
+  @@index([projectId, deletedAt, createdAt])
   @@unique([projectId, externalId])
 }
 
@@ -184,6 +200,37 @@ model Attachment {
 
   clash      Clash @relation(fields: [clashId], references: [id])
   uploadedBy User  @relation(fields: [uploadedById], references: [id])
+
+  annotations Annotation[]
+
+  @@index([clashId])
+}
+
+/**
+ * Vector markup drawn over an attachment (image or PDF page) — never
+ * touches the original file. Geometry is stored normalized to [0,1] of the
+ * page's intrinsic box (see src/lib/annotations.ts on the frontend), so one
+ * mapping is exact at any zoom/viewport size. Shared: every project member
+ * sees every annotation; edit/delete is restricted to the author or
+ * Coordinator/Admin (see AnnotationsService).
+ */
+model Annotation {
+  id           String         @id @default(uuid())
+  attachmentId String
+  pageNumber   Int            @default(1) // always 1 for images
+  authorId     String
+  kind         AnnotationKind
+  geometry     Json
+  color        String         @default("#ef4444")
+  strokeWidth  Float          @default(0.004) // fraction of page WIDTH
+  text         String? // TEXT kind only
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  attachment Attachment @relation(fields: [attachmentId], references: [id])
+  author     User       @relation(fields: [authorId], references: [id])
+
+  @@index([attachmentId, pageNumber])
 }
 
 model Comment {

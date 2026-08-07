@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -45,8 +46,12 @@ export class ClashesController {
   constructor(private readonly clashes: ClashesService) {}
 
   @Get()
-  list(@Query() query: ListClashesQueryDto, @ActiveProject() projectId: string) {
-    return this.clashes.list(query, projectId);
+  list(
+    @Query() query: ListClashesQueryDto,
+    @ActiveProject() projectId: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.clashes.list(query, projectId, user);
   }
 
   // Must come before @Get(':id') — Nest/Express match routes in declaration
@@ -83,6 +88,26 @@ export class ClashesController {
     return this.clashes.update(id, dto, user, projectId);
   }
 
+  @Roles(Role.ADMIN)
+  @Delete(':id')
+  remove(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
+    @ActiveProject() projectId: string,
+  ) {
+    return this.clashes.softDelete(id, user, projectId);
+  }
+
+  @Roles(Role.ADMIN)
+  @Post(':id/restore')
+  restore(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
+    @ActiveProject() projectId: string,
+  ) {
+    return this.clashes.restore(id, user, projectId);
+  }
+
   @Roles(Role.COORDINATOR, Role.ADMIN)
   @Post('bulk')
   bulkUpdate(
@@ -93,7 +118,7 @@ export class ClashesController {
     return this.clashes.bulkUpdate(dto, user, projectId);
   }
 
-  @Roles(Role.ENGINEER, Role.COORDINATOR, Role.ADMIN)
+  @Roles(Role.ENGINEER, Role.COORDINATOR, Role.MANAGEMENT, Role.ADMIN)
   @Post(':id/comments')
   addComment(
     @Param('id') id: string,
@@ -123,6 +148,17 @@ export class ClashesController {
       }
     }
     return this.clashes.addAttachments(id, files, user, projectId);
+  }
+
+  @Roles(Role.ENGINEER, Role.COORDINATOR, Role.ADMIN)
+  @Delete(':clashId/attachments/:attachmentId')
+  deleteAttachment(
+    @Param('clashId') clashId: string,
+    @Param('attachmentId') attachmentId: string,
+    @CurrentUser() user: AuthUser,
+    @ActiveProject() projectId: string,
+  ) {
+    return this.clashes.deleteAttachment(clashId, attachmentId, user, projectId);
   }
 
   @Get(':clashId/attachments/:attachmentId/download')

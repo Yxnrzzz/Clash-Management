@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { NotificationType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from './notifications.service';
+import { NOT_DELETED } from '../clashes/clash-scope';
 
 @Injectable()
 export class OverdueScannerService {
@@ -22,6 +23,7 @@ export class OverdueScannerService {
 
     const overdue = await this.prisma.clash.findMany({
       where: {
+        ...NOT_DELETED,
         dueDate: { lt: now },
         assigneeId: { not: null },
         status: { isClosedState: false },

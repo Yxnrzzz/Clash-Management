@@ -6,10 +6,7 @@ import { z } from "zod";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
 import { formatBytes } from "@/lib/lookup";
-
-const MAX_FILE_MB = 10;
-const MAX_FILES = 10;
-const ACCEPTED_TYPES = ["image/", "application/pdf"];
+import { MAX_FILES, MAX_FILE_MB, validateAttachmentFile } from "@/lib/attachments";
 
 const clashSchema = z.object({
   judul: z.string().min(5, "Judul minimal 5 karakter").max(150, "Judul maksimal 150 karakter"),
@@ -68,20 +65,13 @@ export default function NewClashPage() {
 
   const reporterId = user.id;
 
-  function validateFile(file: File): string | undefined {
-    const typeOk = ACCEPTED_TYPES.some((t) => file.type.startsWith(t));
-    if (!typeOk) return "Tipe file harus gambar atau PDF";
-    if (file.size > MAX_FILE_MB * 1024 * 1024) return `Ukuran melebihi ${MAX_FILE_MB} MB`;
-    return undefined;
-  }
-
   function addFiles(fileList: FileList | File[]) {
     const incoming = Array.from(fileList);
     setFiles((prev) => {
       const combined = [...prev];
       for (const file of incoming) {
         if (combined.length >= MAX_FILES) break;
-        combined.push({ file, error: validateFile(file) });
+        combined.push({ file, error: validateAttachmentFile(file) });
       }
       return combined;
     });

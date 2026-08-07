@@ -12,6 +12,7 @@ const fakeStorage = {
   readStream: jest.fn(),
   signKey: jest.fn((key: string) => ({ token: `signed(${key})`, expiresAt: Date.now() + 300_000 })),
   verifySignedKey: jest.fn((key: string, token: string) => token === `signed(${key})`),
+  delete: jest.fn(() => Promise.resolve()),
 } as unknown as StorageService;
 
 const fakeNotifications = {
@@ -44,6 +45,7 @@ const USERS = [
 const engineer: AuthUser = { id: 'u-eng', email: 'engineer@clashhub.dev', role: Role.ENGINEER };
 const otherEngineer: AuthUser = { id: 'u-eng2', email: 'rizky@clashhub.dev', role: Role.ENGINEER };
 const coordinator: AuthUser = { id: 'u-coord', email: 'coordinator@clashhub.dev', role: Role.COORDINATOR };
+const admin: AuthUser = { id: 'u-admin', email: 'admin@clashhub.dev', role: Role.ADMIN };
 
 function baseClash(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -61,6 +63,7 @@ function baseClash(overrides: Partial<Record<string, unknown>> = {}) {
     dueDate: null as Date | null,
     createdAt: new Date('2026-07-01'),
     closedAt: null as Date | null,
+    deletedAt: null as Date | null,
     ...overrides,
   };
 }
@@ -91,6 +94,14 @@ function makePrisma(clash: ReturnType<typeof baseClash> | null) {
   };
   const clashDelegate = {
     findUnique: jest.fn(() => Promise.resolve(clashRecord)),
+    // Simulates NOT_DELETED filtering: assertClashInProject passes
+    // `deletedAt: null` in `where` unless includeDeleted is set, in which
+    // case that key is absent entirely — see clashes.service.ts.
+    findFirst: jest.fn(({ where }: { where: { deletedAt?: null } }) => {
+      if (!clashRecord) return Promise.resolve(null);
+      if ('deletedAt' in where && clashRecord.deletedAt) return Promise.resolve(null);
+      return Promise.resolve(clashRecord);
+    }),
     findMany: jest.fn(() => Promise.resolve(clashRecord ? [clashRecord] : [])),
     count: jest.fn(() => Promise.resolve(0)),
     update: jest.fn(({ where, data }: { where: { id: string }; data: Record<string, unknown> }) =>
@@ -118,6 +129,10 @@ function makePrisma(clash: ReturnType<typeof baseClash> | null) {
     create: jest.fn(({ data }: { data: Record<string, unknown> }) =>
       Promise.resolve({ id: 'att-1', createdAt: new Date('2026-07-06'), ...data }),
     ),
+    delete: jest.fn(),
+  };
+  const annotation = {
+    deleteMany: jest.fn(),
   };
 
   const prisma = {
@@ -129,12 +144,13 @@ function makePrisma(clash: ReturnType<typeof baseClash> | null) {
     auditLog,
     comment,
     attachment,
+    annotation,
     $transaction: jest.fn((fn: (tx: unknown) => Promise<unknown>) =>
-      fn({ clash: clashDelegate, auditLog }),
+      fn({ clash: clashDelegate, auditLog, attachment, annotation }),
     ),
   } as unknown as PrismaService;
 
-  return { prisma, clashDelegate, auditLog, comment, attachment };
+  return { prisma, clashDelegate, auditLog, comment, attachment, annotation };
 }
 
 describe('ClashesService.update — RBAC', () => {
@@ -352,7 +368,7 @@ describe('ClashesService.bulkUpdate', () => {
     // clash-2 is already at st-inprogress, so its patch is a no-op.
     expect(result).toEqual({ updated: 1 });
     expect(clashDelegate.findMany).toHaveBeenCalledWith({
-      where: { id: { in: ['clash-1', 'clash-2'] }, projectId: PROJECT.id },
+      where: { id: { in: ['clash-1', 'clash-2'] }, projectId: PROJECT.id, deletedAt: null },
     });
   });
 
@@ -446,6 +462,40 @@ describe('ClashesService.create', () => {
       }),
     );
   });
+
+  it('counts the uniqueCode sequence without filtering out soft-deleted clashes', async () => {
+    // Regression guard: filtering this count by deletedAt would let a
+    // deleted clash's uniqueCode be regenerated for a new row, which then
+    // collides on the second (retry) attempt too and hard-fails creation.
+    const { prisma, clashDelegate } = makePrisma(null);
+    const discipline = { id: 'disc-ars', projectId: PROJECT.id, code: 'ARS', name: 'Arsitektur' };
+    const zone = { id: 'zone-1', projectId: PROJECT.id, name: 'Zona A', level: 'Lantai 1' };
+    (prisma as unknown as { discipline: unknown }).discipline = {
+      findUnique: jest.fn(() => Promise.resolve(discipline)),
+    };
+    (prisma as unknown as { zone: unknown }).zone = {
+      findUnique: jest.fn(() => Promise.resolve(zone)),
+    };
+    (clashDelegate.count as jest.Mock).mockResolvedValue(0);
+    (clashDelegate.create as jest.Mock).mockImplementation(
+      ({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'clash-new', ...data }),
+    );
+
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+    await service.create(
+      {
+        title: 'Judul',
+        description: 'Deskripsi',
+        disciplineId: 'disc-ars',
+        zoneId: 'zone-1',
+        priorityId: 'pr-low',
+      },
+      engineer,
+      PROJECT.id,
+    );
+
+    expect(clashDelegate.count).toHaveBeenCalledWith({ where: { disciplineId: 'disc-ars' } });
+  });
 });
 
 describe('ClashesService.list', () => {
@@ -473,12 +523,14 @@ describe('ClashesService.list', () => {
         pageSize: 20,
       } as ListClashesQueryDto,
       PROJECT.id,
+      engineer,
     );
 
     expect(result).toEqual({ data: rows, total: 1 });
     expect(findMany).toHaveBeenCalledWith({
       where: expect.objectContaining({
         projectId: PROJECT.id,
+        deletedAt: null,
         disciplineId: { in: ['disc-ars'] },
         statusId: { in: ['st-open'] },
         status: { isClosedState: false },
@@ -489,7 +541,9 @@ describe('ClashesService.list', () => {
       skip: 20,
       take: 20,
     });
-    expect(count).toHaveBeenCalledWith({ where: expect.objectContaining({ projectId: PROJECT.id }) });
+    expect(count).toHaveBeenCalledWith({
+      where: expect.objectContaining({ projectId: PROJECT.id, deletedAt: null }),
+    });
   });
 
   it('defaults to createdAt desc, page 1, with no filters applied', async () => {
@@ -503,14 +557,50 @@ describe('ClashesService.list', () => {
     await service.list(
       { sort: 'createdAt', dir: 'desc', page: 1, pageSize: 10 } as ListClashesQueryDto,
       PROJECT.id,
+      engineer,
     );
 
     expect(findMany).toHaveBeenCalledWith({
-      where: { projectId: PROJECT.id },
+      where: { projectId: PROJECT.id, deletedAt: null },
       orderBy: { createdAt: 'desc' },
       skip: 0,
       take: 10,
     });
+  });
+
+  it('switches to the trash-bin view for Admin when deleted=true', async () => {
+    const findMany = jest.fn(() => Promise.resolve([]));
+    const count = jest.fn(() => Promise.resolve(0));
+    const prisma = {
+      clash: { findMany, count },
+    } as unknown as PrismaService;
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await service.list(
+      { sort: 'createdAt', dir: 'desc', page: 1, pageSize: 10, deleted: true } as ListClashesQueryDto,
+      PROJECT.id,
+      admin,
+    );
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: { projectId: PROJECT.id, deletedAt: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      skip: 0,
+      take: 10,
+    });
+  });
+
+  it('rejects a non-Admin requesting the trash-bin view', async () => {
+    const prisma = { clash: { findMany: jest.fn(), count: jest.fn() } } as unknown as PrismaService;
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(
+      service.list(
+        { sort: 'createdAt', dir: 'desc', page: 1, pageSize: 10, deleted: true } as ListClashesQueryDto,
+        PROJECT.id,
+        coordinator,
+      ),
+    ).rejects.toThrow(ForbiddenException);
   });
 });
 
@@ -617,6 +707,26 @@ describe('ClashesService.addAttachments', () => {
     expect(created).toHaveLength(1);
   });
 
+  it('writes an "attachment_added" audit row per uploaded file', async () => {
+    const { prisma, auditLog } = makePrisma(baseClash());
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+    const files = [
+      { originalname: 'photo.png', mimetype: 'image/png', size: 1024, buffer: Buffer.from('x') },
+    ] as Express.Multer.File[];
+
+    await service.addAttachments('clash-1', files, engineer, PROJECT.id);
+
+    expect(auditLog.create).toHaveBeenCalledWith({
+      data: {
+        clashId: 'clash-1',
+        actorId: 'u-eng',
+        action: 'attachment_added',
+        field: 'attachment',
+        newValue: 'photo.png',
+      },
+    });
+  });
+
   it('throws NotFoundException for a missing clash', async () => {
     const { prisma } = makePrisma(null);
     const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
@@ -633,6 +743,96 @@ describe('ClashesService.addAttachments', () => {
     await expect(service.addAttachments('clash-1', [], engineer, PROJECT.id)).rejects.toThrow(
       NotFoundException,
     );
+  });
+});
+
+describe('ClashesService.deleteAttachment', () => {
+  function withAttachment(uploadedById: string) {
+    const { prisma, attachment, auditLog } = makePrisma(baseClash());
+    (attachment.findUnique as jest.Mock).mockResolvedValue({
+      id: 'att-1',
+      clashId: 'clash-1',
+      fileUrl: 'clash-1/fake-key.png',
+      fileName: 'photo.png',
+      uploadedById,
+    });
+    return { prisma, attachment, auditLog };
+  }
+
+  it('allows an Engineer to delete their own upload', async () => {
+    const { prisma, attachment, auditLog } = withAttachment('u-eng');
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    const result = await service.deleteAttachment('clash-1', 'att-1', engineer, PROJECT.id);
+
+    expect(result).toEqual({ id: 'att-1' });
+    expect(attachment.delete).toHaveBeenCalledWith({ where: { id: 'att-1' } });
+    expect(prisma.annotation.deleteMany).toHaveBeenCalledWith({ where: { attachmentId: 'att-1' } });
+    expect(auditLog.create).toHaveBeenCalledWith({
+      data: {
+        clashId: 'clash-1',
+        actorId: 'u-eng',
+        action: 'attachment_deleted',
+        field: 'attachment',
+        oldValue: 'photo.png',
+      },
+    });
+    expect(fakeStorage.delete).toHaveBeenCalledWith('clash-1/fake-key.png');
+  });
+
+  it('rejects an Engineer deleting someone else\'s upload', async () => {
+    const { prisma, attachment } = withAttachment('u-eng2');
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(service.deleteAttachment('clash-1', 'att-1', engineer, PROJECT.id)).rejects.toThrow(
+      ForbiddenException,
+    );
+    expect(attachment.delete).not.toHaveBeenCalled();
+  });
+
+  it('allows Coordinator to delete any upload', async () => {
+    const { prisma, attachment } = withAttachment('u-eng');
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await service.deleteAttachment('clash-1', 'att-1', coordinator, PROJECT.id);
+    expect(attachment.delete).toHaveBeenCalled();
+  });
+
+  it('allows Admin to delete any upload', async () => {
+    const { prisma, attachment } = withAttachment('u-eng');
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await service.deleteAttachment('clash-1', 'att-1', admin, PROJECT.id);
+    expect(attachment.delete).toHaveBeenCalled();
+  });
+
+  it('throws NotFoundException for an attachment from another clash', async () => {
+    const { prisma, attachment } = makePrisma(baseClash());
+    (attachment.findUnique as jest.Mock).mockResolvedValue({
+      id: 'att-1',
+      clashId: 'clash-other',
+      fileUrl: 'x',
+      fileName: 'photo.png',
+      uploadedById: 'u-eng',
+    });
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(service.deleteAttachment('clash-1', 'att-1', engineer, PROJECT.id)).rejects.toThrow(
+      NotFoundException,
+    );
+  });
+
+  it('does not throw when the storage unlink fails (fire-and-forget)', async () => {
+    const { prisma } = withAttachment('u-eng');
+    const failingStorage = {
+      ...fakeStorage,
+      delete: jest.fn(() => Promise.reject(new Error('disk unavailable'))),
+    } as unknown as StorageService;
+    const service = new ClashesService(prisma, failingStorage, fakeNotifications);
+
+    await expect(service.deleteAttachment('clash-1', 'att-1', engineer, PROJECT.id)).resolves.toEqual({
+      id: 'att-1',
+    });
   });
 });
 
@@ -755,6 +955,110 @@ describe('ClashesService.streamBySignedToken', () => {
 
     await expect(
       service.streamBySignedToken('att-ghost', 'anything', Date.now() + 1000),
+    ).rejects.toThrow(NotFoundException);
+  });
+});
+
+describe('ClashesService.softDelete', () => {
+  it('sets deletedAt and writes a "deleted" audit row', async () => {
+    const { prisma, clashDelegate, auditLog } = makePrisma(baseClash());
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await service.softDelete('clash-1', admin, PROJECT.id);
+
+    expect(clashDelegate.update).toHaveBeenCalledWith({
+      where: { id: 'clash-1' },
+      data: { deletedAt: expect.any(Date) },
+    });
+    expect(auditLog.create).toHaveBeenCalledWith({
+      data: { clashId: 'clash-1', actorId: 'u-admin', action: 'deleted' },
+    });
+  });
+
+  it('throws NotFoundException when deleting an already-deleted clash', async () => {
+    const { prisma } = makePrisma(baseClash({ deletedAt: new Date('2026-07-10') }));
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(service.softDelete('clash-1', admin, PROJECT.id)).rejects.toThrow(NotFoundException);
+  });
+});
+
+describe('ClashesService.restore', () => {
+  it('clears deletedAt and writes a "restored" audit row', async () => {
+    const { prisma, clashDelegate, auditLog } = makePrisma(
+      baseClash({ deletedAt: new Date('2026-07-10') }),
+    );
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await service.restore('clash-1', admin, PROJECT.id);
+
+    expect(clashDelegate.update).toHaveBeenCalledWith({
+      where: { id: 'clash-1' },
+      data: { deletedAt: null },
+    });
+    expect(auditLog.create).toHaveBeenCalledWith({
+      data: { clashId: 'clash-1', actorId: 'u-admin', action: 'restored' },
+    });
+  });
+
+  it('rejects restoring a clash that is not deleted', async () => {
+    const { prisma } = makePrisma(baseClash({ deletedAt: null }));
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(service.restore('clash-1', admin, PROJECT.id)).rejects.toThrow(
+      'Clash ini tidak dalam status terhapus.',
+    );
+  });
+
+  it('throws NotFoundException restoring an id that does not exist at all', async () => {
+    const { prisma } = makePrisma(null);
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(service.restore('missing', admin, PROJECT.id)).rejects.toThrow(NotFoundException);
+  });
+});
+
+describe('soft-deleted clashes are invisible to the normal read/write paths', () => {
+  it('findDetail 404s for a soft-deleted clash', async () => {
+    const { prisma } = makePrisma(baseClash({ deletedAt: new Date('2026-07-10') }));
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(service.findDetail('clash-1', PROJECT.id)).rejects.toThrow(NotFoundException);
+  });
+
+  it('update 404s for a soft-deleted clash', async () => {
+    const { prisma } = makePrisma(baseClash({ deletedAt: new Date('2026-07-10') }));
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(
+      service.update('clash-1', { statusId: 'st-inprogress' }, coordinator, PROJECT.id),
+    ).rejects.toThrow(NotFoundException);
+  });
+
+  it('addComment 404s for a soft-deleted clash', async () => {
+    const { prisma } = makePrisma(baseClash({ deletedAt: new Date('2026-07-10') }));
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(
+      service.addComment('clash-1', { content: 'hi' }, coordinator, PROJECT.id),
+    ).rejects.toThrow(NotFoundException);
+  });
+
+  it('bulkUpdate rejects the whole batch if any id is soft-deleted', async () => {
+    const { prisma, clashDelegate } = makePrisma(baseClash());
+    // findMany is what bulkUpdate actually queries; simulate the deleted
+    // row being filtered out by NOT_DELETED so the length check trips.
+    (clashDelegate.findMany as jest.Mock) = jest.fn(() =>
+      Promise.resolve([baseClash({ id: 'clash-1' })]),
+    );
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(
+      service.bulkUpdate(
+        { ids: ['clash-1', 'clash-2-deleted'], patch: { statusId: 'st-inprogress' } },
+        coordinator,
+        PROJECT.id,
+      ),
     ).rejects.toThrow(NotFoundException);
   });
 });

@@ -31,12 +31,42 @@ export function canEditClash(role: Role, clash: Clash, userId: string) {
   return false;
 }
 
-export function canComment(role: Role) {
-  return role !== "Management";
-}
-
 export function isAdmin(role: Role) {
   return role === "Admin";
+}
+
+export function canDeleteClash(role: Role) {
+  return role === "Admin";
+}
+
+/** Any role that can write may attach files to any clash in their project —
+ * unlike editing the clash's own fields, this isn't restricted to the
+ * assignee/reporter. Management stays read-only. */
+export function canUploadAttachment(role: Role) {
+  return role === "Engineer" || role === "Coordinator" || role === "Admin";
+}
+
+/** Engineer may delete only their own upload; Coordinator/Admin may delete
+ * anyone's. Keyed on the uploader, not assignee/reporter — a distinct rule
+ * from canEditClash(). */
+export function canDeleteAttachment(role: Role, uploadedById: string, userId: string) {
+  if (role === "Coordinator" || role === "Admin") return true;
+  if (role === "Engineer") return uploadedById === userId;
+  return false;
+}
+
+/** Markup is shared but only writable by roles that can already write
+ * elsewhere — Management stays read-only, same as attachments/comments. */
+export function canDrawAnnotation(role: Role) {
+  return role === "Engineer" || role === "Coordinator" || role === "Admin";
+}
+
+/** Author may edit/delete their own markup; Coordinator/Admin may edit/
+ * delete anyone's — mirrors canDeleteAttachment's shape. */
+export function canEditAnnotation(role: Role, authorId: string, userId: string) {
+  if (role === "Coordinator" || role === "Admin") return true;
+  if (role === "Engineer") return authorId === userId;
+  return false;
 }
 
 export function isAssignable(user: User) {

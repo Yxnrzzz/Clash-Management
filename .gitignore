@@ -47,3 +47,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# pdf.js worker — copied from node_modules by scripts/copy-pdf-worker.mjs
+# (predev/prebuild), regenerated on every install rather than committed.
+/public/pdf.worker.min.mjs

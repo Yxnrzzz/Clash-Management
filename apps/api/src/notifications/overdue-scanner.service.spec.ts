@@ -63,4 +63,18 @@ describe('OverdueScannerService.scan', () => {
     // Only clash.findMany was called — no point querying past notifications.
     expect(findMany).toHaveBeenCalledTimes(1);
   });
+
+  it('excludes soft-deleted clashes from the overdue scan', async () => {
+    const { findMany } = makeHarness([], []);
+
+    await new OverdueScannerService(
+      { clash: { findMany }, notification: { findMany } } as unknown as PrismaService,
+      { enqueueOverdue: jest.fn(() => Promise.resolve()) } as unknown as NotificationsService,
+    ).scan();
+
+    expect(findMany).toHaveBeenNthCalledWith(1, {
+      where: expect.objectContaining({ deletedAt: null }),
+      select: { id: true, assigneeId: true },
+    });
+  });
 });

@@ -179,6 +179,13 @@ export class ImportProcessor extends WorkerHost {
     // (projectId, externalId) is the authoritative guard against a race
     // between two rows/jobs, this check just avoids the DB round trip and
     // gives a clean "skipped" outcome in the common (non-racing) case.
+    // Deliberately NOT filtered by deletedAt: @@unique([projectId,
+    // externalId]) isn't soft-delete-aware either, so a soft-deleted
+    // imported clash keeps occupying its externalId slot forever. Filtering
+    // this check would just make the create attempt hit that constraint
+    // instead and land in the same "skipped" outcome via
+    // DuplicateExternalIdError below — leaving it unfiltered keeps the
+    // clean path and means a re-import never resurrects a deleted row.
     const externalId = resolved.externalIdRaw || null;
     if (externalId) {
       const existing = await this.prisma.clash.findFirst({

@@ -189,6 +189,12 @@ describe('Multi-project isolation (IDOR)', () => {
       findUnique: jest.fn(({ where: { id } }: { where: { id: string } }) =>
         Promise.resolve(clashes.find((c) => c.id === id) ?? null),
       ),
+      // assertClashInProject uses findFirst (not findUnique) so it can add
+      // a deletedAt filter to the where clause — see clashes.service.ts.
+      // None of these fixtures are soft-deleted, so id lookup is enough.
+      findFirst: jest.fn(({ where: { id } }: { where: { id: string } }) =>
+        Promise.resolve(clashes.find((c) => c.id === id) ?? null),
+      ),
       findMany: jest.fn(
         ({ where }: { where: { projectId?: string; id?: { in: string[] } } }) =>
           Promise.resolve(
