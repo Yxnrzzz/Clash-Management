@@ -12,10 +12,11 @@ export class CreateUserDto {
   @IsEnum(Role, { message: 'Peran tidak dikenal' })
   role!: Role;
 
-  /** Optional: falls back to the shared demo password when omitted. */
+  /** Optional: a random temporary password is generated (and returned once,
+   * see UsersService.create) when omitted. */
   @IsOptional()
   @IsString()
-  @MinLength(4, { message: 'Password minimal 4 karakter' })
+  @MinLength(12, { message: 'Password minimal 12 karakter' })
   password?: string;
 }
 

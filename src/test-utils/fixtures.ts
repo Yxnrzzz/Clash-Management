@@ -7,6 +7,7 @@ export function makeUser(overrides: Partial<User> = {}): User {
     email: "test@example.com",
     peran: "Engineer",
     isActive: true,
+    mustChangePassword: false,
     ...overrides,
   };
 }

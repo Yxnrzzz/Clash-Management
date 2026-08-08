@@ -13,6 +13,7 @@ export interface ApiUser {
   email: string;
   role: ApiRole;
   isActive: boolean;
+  mustChangePassword: boolean;
 }
 
 export interface ApiProject {

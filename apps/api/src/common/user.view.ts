@@ -7,6 +7,7 @@ export interface UserView {
   email: string;
   role: Role;
   isActive: boolean;
+  mustChangePassword: boolean;
 }
 
 export function toUserView(user: User): UserView {
@@ -16,5 +17,6 @@ export function toUserView(user: User): UserView {
     email: user.email,
     role: user.role,
     isActive: user.isActive,
+    mustChangePassword: user.mustChangePassword,
   };
 }

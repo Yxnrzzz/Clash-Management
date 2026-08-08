@@ -170,9 +170,12 @@ interface DataContextValue extends MasterState {
   createProject: (input: Pick<Project, "nama" | "kode">) => Promise<Project>;
   updateProject: (patch: Partial<Pick<Project, "nama" | "kode">>) => void;
 
-  createUser: (input: Pick<User, "nama" | "email" | "peran">) => Promise<User>;
+  createUser: (
+    input: Pick<User, "nama" | "email" | "peran">
+  ) => Promise<{ user: User; temporaryPassword?: string }>;
   updateUser: (id: string, patch: Partial<Pick<User, "nama" | "email" | "peran">>) => void;
   toggleUserActive: (id: string) => void;
+  resetUserPassword: (id: string) => Promise<{ temporaryPassword: string }>;
 
   createDiscipline: (input: Pick<Discipline, "kode" | "nama">) => Promise<Discipline>;
   updateDiscipline: (id: string, patch: Partial<Pick<Discipline, "kode" | "nama">>) => void;
@@ -591,13 +594,24 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   // --- Users ----------------------------------------------------------------
 
   const createUser = useCallback(
-    (input: Pick<User, "nama" | "email" | "peran">): Promise<User> =>
+    (
+      input: Pick<User, "nama" | "email" | "peran">
+    ): Promise<{ user: User; temporaryPassword?: string }> =>
       runWrite(
-        () => apiPost<ApiUser>("/users", userPayload(input)),
+        () => apiPost<ApiUser & { temporaryPassword?: string }>("/users", userPayload(input)),
         (created) =>
           patchMaster((prev) => ({ ...prev, users: [...prev.users, toUser(created)] }))
-      ).then(toUser),
+      ).then((created) => ({ user: toUser(created), temporaryPassword: created.temporaryPassword })),
     [patchMaster, runWrite]
+  );
+
+  /** Admin-only — issues a fresh random password for the account, forces the
+   * change-password gate, and revokes its other sessions (see
+   * UsersService.resetPassword). The password is returned once, here. */
+  const resetUserPassword = useCallback(
+    (id: string): Promise<{ temporaryPassword: string }> =>
+      apiPost<{ temporaryPassword: string }>(`/users/${id}/reset-password`),
+    []
   );
 
   const updateUser = useCallback(
@@ -816,6 +830,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       createUser,
       updateUser,
       toggleUserActive,
+      resetUserPassword,
       createDiscipline,
       updateDiscipline,
       toggleDisciplineActive,
@@ -848,6 +863,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       createUser,
       updateUser,
       toggleUserActive,
+      resetUserPassword,
       createDiscipline,
       updateDiscipline,
       toggleDisciplineActive,

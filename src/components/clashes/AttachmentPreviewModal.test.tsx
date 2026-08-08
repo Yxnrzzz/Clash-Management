@@ -68,7 +68,14 @@ const PDF: Attachment = {
   createdAt: "2026-01-01T00:00:00.000Z",
 };
 
-const USER: User = { id: "u1", nama: "Budi", email: "budi@eps.dev", peran: "Engineer", isActive: true };
+const USER: User = {
+  id: "u1",
+  nama: "Budi",
+  email: "budi@eps.dev",
+  peran: "Engineer",
+  isActive: true,
+  mustChangePassword: false,
+};
 const CURRENT_USER: { id: string; peran: Role } = { id: "u1", peran: "Engineer" };
 
 function userById() {

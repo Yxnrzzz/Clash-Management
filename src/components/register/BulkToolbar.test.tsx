@@ -15,7 +15,14 @@ const PRIORITIES: Priority[] = [{ id: "p-low", nama: "Low", bobot: 1, isActive: 
 // reaches here. These tests only prove the toolbar renders exactly the
 // list it's handed, neither adding nor dropping anyone.
 const ASSIGNABLE_USERS: User[] = [
-  { id: "u-eng-1", nama: "Budi Engineer", email: "budi@eps.dev", peran: "Engineer", isActive: true },
+  {
+    id: "u-eng-1",
+    nama: "Budi Engineer",
+    email: "budi@eps.dev",
+    peran: "Engineer",
+    isActive: true,
+    mustChangePassword: false,
+  },
 ];
 
 function renderToolbar(overrides: Partial<Parameters<typeof BulkToolbar>[0]> = {}) {

@@ -19,10 +19,17 @@ type FormErrors = Partial<Record<keyof FormValues, string>>;
 
 export default function AdminUsersPage() {
   const { user, isLoading } = useRequireAdmin();
-  const { users, createUser, updateUser, toggleUserActive } = useData();
+  const { users, createUser, updateUser, toggleUserActive, resetUserPassword } = useData();
   const [values, setValues] = useState<FormValues>({ nama: "", email: "", peran: "Engineer" });
   const [errors, setErrors] = useState<FormErrors>({});
   const [formOpen, setFormOpen] = useState(false);
+  // Holds the one-time temporary password just issued — by a new-user create
+  // or an admin-triggered reset — so it can be shown once and then
+  // discarded. The server never returns it again after this response.
+  const [revealedPassword, setRevealedPassword] = useState<{ email: string; password: string } | null>(
+    null
+  );
+  const [resettingId, setResettingId] = useState<string | null>(null);
 
   if (isLoading || !user) {
     return <div className="p-8 text-sm text-zinc-500">Memuat…</div>;
@@ -44,8 +51,9 @@ export default function AdminUsersPage() {
       return;
     }
     setErrors({});
+    let created: { user: { email: string }; temporaryPassword?: string };
     try {
-      await createUser(result.data);
+      created = await createUser(result.data);
     } catch (error) {
       // The server checks uniqueness too, and it is the authority — surface its
       // message on the email field rather than silently dropping the failure.
@@ -56,6 +64,22 @@ export default function AdminUsersPage() {
     }
     setValues({ nama: "", email: "", peran: "Engineer" });
     setFormOpen(false);
+    if (created.temporaryPassword) {
+      setRevealedPassword({ email: created.user.email, password: created.temporaryPassword });
+    }
+  }
+
+  async function handleResetPassword(id: string, email: string) {
+    setResettingId(id);
+    try {
+      const { temporaryPassword } = await resetUserPassword(id);
+      setRevealedPassword({ email, password: temporaryPassword });
+    } catch {
+      // No dedicated banner here — the action is retryable and the button
+      // simply becomes clickable again.
+    } finally {
+      setResettingId(null);
+    }
   }
 
   return (
@@ -74,6 +98,31 @@ export default function AdminUsersPage() {
           {formOpen ? "Tutup" : "+ User Baru"}
         </button>
       </div>
+
+      {revealedPassword && (
+        <div className="mb-6 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="font-medium">
+                Password sementara untuk <span className="font-mono">{revealedPassword.email}</span>
+              </p>
+              <p className="mt-1 font-mono text-base font-semibold tracking-wide">
+                {revealedPassword.password}
+              </p>
+              <p className="mt-2 text-xs text-amber-700">
+                Sampaikan ke pemilik akun sekarang — password ini tidak dapat ditampilkan lagi setelah
+                ditutup, dan akun akan diminta menggantinya saat login berikutnya.
+              </p>
+            </div>
+            <button
+              onClick={() => setRevealedPassword(null)}
+              className="shrink-0 text-xs font-medium text-amber-700 hover:text-amber-900 hover:underline"
+            >
+              Tutup
+            </button>
+          </div>
+        </div>
+      )}
 
       {formOpen && (
         <form
@@ -169,6 +218,13 @@ export default function AdminUsersPage() {
                   </span>
                 </td>
                 <td className="px-4 py-3 text-right">
+                  <button
+                    onClick={() => handleResetPassword(u.id, u.email)}
+                    disabled={resettingId === u.id}
+                    className="mr-3 text-xs font-medium text-zinc-500 hover:text-zinc-900 hover:underline disabled:opacity-40"
+                  >
+                    {resettingId === u.id ? "Mereset…" : "Reset Password"}
+                  </button>
                   <button
                     onClick={() => toggleUserActive(u.id)}
                     disabled={u.id === user.id}

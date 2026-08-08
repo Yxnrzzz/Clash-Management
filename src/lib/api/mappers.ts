@@ -61,6 +61,7 @@ export const toUser = (u: ApiUser): User => ({
   email: u.email,
   peran: toRole(u.role),
   isActive: u.isActive,
+  mustChangePassword: u.mustChangePassword,
 });
 
 export const toProject = (p: ApiProject): Project => ({

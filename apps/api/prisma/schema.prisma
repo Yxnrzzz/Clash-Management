@@ -46,12 +46,27 @@ model User {
   passwordHash String
   role         Role
   isActive     Boolean  @default(true)
-  // Bumped on logout (and could be on password change). Refresh JWTs carry
-  // the version they were issued with; a mismatch means the token predates
-  // the last logout and is rejected even though its signature/exp are still
-  // valid — this is what makes logout actually invalidate stolen tokens
-  // instead of merely clearing the browser's cookie.
+  // Bumped on logout (and on password change — see AuthService.changePassword)
+  // and used as the emergency "sign out everywhere" lever. Refresh JWTs
+  // carry the version they were issued with; a mismatch means the token
+  // predates the last logout/password-change and is rejected even though
+  // its signature/exp are still valid. Day-to-day revocation of a single
+  // session is handled by RefreshSession below instead — this counter is
+  // for revoking every session at once.
   refreshTokenVersion Int      @default(0)
+  // True for every account created by an Admin without an explicit
+  // password, and set on the whole table by the migration that introduced
+  // this column (every pre-existing account shared the `demo1234` default).
+  // useRequireAuth() on the frontend redirects to /settings/password and
+  // refuses to render anything else while this is true.
+  mustChangePassword  Boolean   @default(false)
+  passwordChangedAt   DateTime?
+  // Counts consecutive failed login attempts; reset to 0 on a successful
+  // login. Distinct from the per-IP throttle on POST /auth/login — this
+  // bounds total attempts against ONE account regardless of how many
+  // source IPs a distributed attacker spreads across.
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -65,6 +80,29 @@ model User {
   notificationPreference  NotificationPreference?
   importJobs              ImportJob[]
   annotations             Annotation[]
+  refreshSessions         RefreshSession[]
+}
+
+/**
+ * One row per refresh token ever issued, so a refresh can be rotated (old
+ * token marked revoked, new one issued) and — critically — so a REUSE of an
+ * already-rotated token can be detected: that pattern means the token was
+ * stolen and used after the legitimate client had already moved on to its
+ * replacement. See AuthService.refresh(). tokenHash is sha256(token), never
+ * the raw token, so a leaked database dump doesn't hand out valid sessions.
+ */
+model RefreshSession {
+  id           String    @id @default(uuid())
+  userId       String
+  tokenHash    String    @unique
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  replacedById String?
+  createdAt    DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
 }
 
 model Project {

@@ -159,3 +159,18 @@ export async function logout(): Promise<void> {
     setAccessToken(null);
   }
 }
+
+/**
+ * Changing the password revokes every other session server-side (see
+ * AuthService.changePassword), including the one this very request rides
+ * on — the response carries a fresh access token (and resets the refresh
+ * cookie) so the caller isn't logged out by the action they just took.
+ */
+export async function changePassword(currentPassword: string, newPassword: string): Promise<ApiSession> {
+  const session = await send<ApiSession>("/auth/change-password", {
+    method: "POST",
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  setAccessToken(session.accessToken);
+  return session;
+}

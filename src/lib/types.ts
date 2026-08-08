@@ -6,6 +6,7 @@ export interface User {
   email: string;
   peran: Role;
   isActive: boolean;
+  mustChangePassword: boolean;
 }
 
 export interface Project {

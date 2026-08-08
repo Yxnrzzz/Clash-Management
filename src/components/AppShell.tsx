@@ -1,10 +1,13 @@
 "use client";
 
+import { useEffect } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { useData } from "@/lib/data-context";
+
+const PASSWORD_CHANGE_PATH = "/settings/password";
 
 const ROLE_LABEL: Record<string, string> = {
   Engineer: "Field / Design Engineer",
@@ -18,6 +21,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { project, projects, setActiveProject, syncError } = useData();
   const pathname = usePathname();
   const router = useRouter();
+
+  // Global gate: a user whose password is still the one-time temporary
+  // value (fresh account or admin reset — see UsersService) cannot use
+  // anything else until they change it. Lives here rather than in
+  // useRequireAuth() because AppShell is the one wrapper every route
+  // renders inside (including pages like /dashboard that don't call any
+  // auth hook themselves), so this is the only choke point guaranteed to
+  // catch all of them — including client-side navigation between routes,
+  // since the effect re-runs on every pathname change.
+  useEffect(() => {
+    if (user?.mustChangePassword && pathname !== PASSWORD_CHANGE_PATH) {
+      router.replace(PASSWORD_CHANGE_PATH);
+    }
+  }, [user, pathname, router]);
 
   if (!user) {
     return <>{children}</>;
@@ -110,12 +127,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Link
               href="/settings/notifications"
               className={`block rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                pathname.startsWith("/settings")
+                pathname === "/settings/notifications"
                   ? "bg-zinc-900 text-white"
                   : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
               }`}
             >
               Pengaturan Notifikasi
+            </Link>
+            <Link
+              href={PASSWORD_CHANGE_PATH}
+              className={`block rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                pathname === PASSWORD_CHANGE_PATH
+                  ? "bg-zinc-900 text-white"
+                  : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
+              }`}
+            >
+              Ganti Password
             </Link>
           </div>
         </nav>

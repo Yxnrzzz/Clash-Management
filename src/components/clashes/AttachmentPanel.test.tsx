@@ -4,8 +4,22 @@ import { AttachmentPanel } from "./AttachmentPanel";
 import type { Attachment, User } from "@/lib/types";
 
 const USERS: Record<string, User> = {
-  "u-eng-1": { id: "u-eng-1", nama: "Budi Engineer", email: "budi@eps.dev", peran: "Engineer", isActive: true },
-  "u-eng-2": { id: "u-eng-2", nama: "Citra Engineer", email: "citra@eps.dev", peran: "Engineer", isActive: true },
+  "u-eng-1": {
+    id: "u-eng-1",
+    nama: "Budi Engineer",
+    email: "budi@eps.dev",
+    peran: "Engineer",
+    isActive: true,
+    mustChangePassword: false,
+  },
+  "u-eng-2": {
+    id: "u-eng-2",
+    nama: "Citra Engineer",
+    email: "citra@eps.dev",
+    peran: "Engineer",
+    isActive: true,
+    mustChangePassword: false,
+  },
 };
 
 function userById(id: string) {

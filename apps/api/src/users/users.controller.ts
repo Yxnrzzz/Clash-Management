@@ -34,4 +34,12 @@ export class UsersController {
   setActive(@Param('id') id: string, @Body() dto: SetActiveDto) {
     return this.users.setActive(id, dto.isActive);
   }
+
+  /** Returns the new temporary password once, in the response body — there
+   * is no other way to retrieve it afterwards. See UsersService.resetPassword. */
+  @Roles(Role.ADMIN)
+  @Post(':id/reset-password')
+  resetPassword(@Param('id') id: string) {
+    return this.users.resetPassword(id);
+  }
 }

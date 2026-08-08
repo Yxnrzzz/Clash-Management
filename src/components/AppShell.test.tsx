@@ -12,9 +12,11 @@ import type { Project, User } from "@/lib/types";
 // since ES module imports resolve before any of the helper's own code runs.
 vi.mock("@/lib/auth-context", () => ({ useAuth: vi.fn() }));
 vi.mock("@/lib/data-context", () => ({ useData: vi.fn() }));
+const mockRouterReplace = vi.fn();
+
 vi.mock("next/navigation", () => ({
   usePathname: () => "/register",
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: mockRouterReplace }),
 }));
 
 const mockedUseAuth = vi.mocked(useAuth);
@@ -35,7 +37,7 @@ function setup(options: {
   mockedUseAuth.mockReturnValue({
     user: options.user === undefined ? makeUser() : options.user,
     logout,
-  } as ReturnType<typeof useAuth>);
+  } as unknown as ReturnType<typeof useAuth>);
 
   mockedUseData.mockReturnValue({
     project,
@@ -116,5 +118,17 @@ describe("AppShell", () => {
     setup({ syncError: null });
     render(<AppShell>content</AppShell>);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("redirects to /settings/password when the signed-in user must change their password", () => {
+    setup({ user: makeUser({ mustChangePassword: true }) });
+    render(<AppShell>content</AppShell>);
+    expect(mockRouterReplace).toHaveBeenCalledWith("/settings/password");
+  });
+
+  it("does not redirect once the password has already been changed", () => {
+    setup({ user: makeUser({ mustChangePassword: false }) });
+    render(<AppShell>content</AppShell>);
+    expect(mockRouterReplace).not.toHaveBeenCalled();
   });
 });
