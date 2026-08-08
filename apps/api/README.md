@@ -187,7 +187,7 @@ Kedua bentuk XML di-flatten jadi baris berdasarkan atribut elemen (`<clashresult
 
 ## Akun demo (hasil seed)
 
-Password untuk semua akun: **`demo1234`** (di-hash dengan argon2id).
+Password untuk semua akun: **`demo1234-local-dev-only`** secara default, atau nilai env `SEED_PASSWORD` bila di-set (di-hash dengan argon2id). `prisma db seed` menolak berjalan saat `NODE_ENV=production` kecuali `ALLOW_PRODUCTION_SEED=true` — lihat `prisma/seed.ts`. Setiap akun hasil seed ditandai `mustChangePassword`, jadi login pertama langsung diarahkan ke ganti password sebelum bisa memakai aplikasi.
 
 | Peran | Email |
 |---|---|

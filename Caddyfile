@@ -1,0 +1,17 @@
+# TLS termination + reverse proxy in front of the `web` container — the only
+# thing docker-compose.prod.yml publishes to the host (ports 80/443). Caddy
+# obtains and renews a Let's Encrypt certificate for {$DOMAIN} automatically;
+# that requires DOMAIN's DNS A record to already point at this host's public
+# IP before the stack starts, and ports 80+443 reachable from the internet
+# (Let's Encrypt's HTTP-01 challenge needs port 80).
+#
+# /api/* is NOT routed separately here — Next.js's own rewrites()
+# (next.config.ts) already proxies it server-side to the `api` container, so
+# Caddy only ever needs to know about `web:3000`.
+{$DOMAIN} {
+	tls {$ACME_EMAIL}
+
+	encode zstd gzip
+
+	reverse_proxy web:3000
+}

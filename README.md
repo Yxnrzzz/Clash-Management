@@ -47,19 +47,24 @@ Buka [http://localhost:3000](http://localhost:3000). Frontend mem-proxy `/api/*`
 
 ### Menjalankan dengan Docker (produksi)
 
-Ada Dockerfile produksi terpisah untuk masing-masing paket (`Dockerfile` di root untuk web, `apps/api/Dockerfile` untuk api — keduanya multi-stage, image runner non-root). `docker-compose.prod.yml` di root menyatukan keduanya dengan Postgres + Redis:
+Ada Dockerfile produksi terpisah untuk masing-masing paket (`Dockerfile` di root untuk web, `apps/api/Dockerfile` untuk api — keduanya multi-stage, image runner non-root). `docker-compose.prod.yml` di root menyatukan keduanya dengan Postgres + Redis + Caddy (TLS otomatis via Let's Encrypt) — hanya Caddy yang mem-publish port ke host (80/443); `web` dan `api` hanya bisa dijangkau lewat jaringan Docker internal.
 
 ```bash
-cp apps/api/.env.example apps/api/.env   # lalu isi JWT_*_SECRET dsb dengan nilai produksi, bukan placeholder dev
+cp .env.prod.example .env                # isi POSTGRES_PASSWORD, REDIS_PASSWORD, DOMAIN, ACME_EMAIL
+cp apps/api/.env.example apps/api/.env   # isi JWT_*_SECRET, ATTACHMENT_URL_SECRET dsb dengan nilai produksi, bukan placeholder dev
 docker compose -f docker-compose.prod.yml up -d --build
 docker compose -f docker-compose.prod.yml exec api npx prisma migrate deploy
 ```
 
+Arahkan DNS `DOMAIN` ke IP host ini **sebelum** menjalankan `up` — Caddy butuh port 80 terjangkau dari internet untuk menerbitkan sertifikat TLS lewat tantangan HTTP-01. Kedua file `.env` wajib diisi; `docker compose config` akan gagal dengan pesan jelas jika ada yang kosong (lihat `docker-compose.prod.yml` untuk daftar variabel).
+
 Ini **terpisah** dari `apps/api/docker-compose.yml` yang dipakai sehari-hari (dependensi dev saja — `postgres`/`redis`/`mailhog`, aplikasi tetap dijalankan via `npm run dev`); `docker-compose.prod.yml` menjalankan aplikasinya juga sebagai container.
 
-## Akun demo
+## Akun demo (hanya untuk `npm run dev` / seed lokal)
 
-Password untuk semua akun: **`demo1234`** (di-hash argon2id di database). Admin bisa membuat user baru dari `/admin/users` — akun baru tersimpan di database dengan password default yang sama dan langsung bisa dipakai login.
+Password: **`demo1234-local-dev-only`** secara default, atau nilai `SEED_PASSWORD` bila di-set (di-hash argon2id di database) — lihat `apps/api/prisma/seed.ts`, yang menolak berjalan di `NODE_ENV=production` kecuali `ALLOW_PRODUCTION_SEED=true` disengaja. Setiap akun seed ditandai wajib ganti password saat login pertama.
+
+Di luar seed, Admin membuat user baru dari `/admin/users` — setiap akun baru (atau hasil "Reset Password") mendapat password acak sekali pakai yang **hanya ditampilkan sekali** di UI saat itu juga, dan akun tersebut wajib menggantinya sebelum bisa memakai aplikasi.
 
 | Peran | Email |
 |---|---|

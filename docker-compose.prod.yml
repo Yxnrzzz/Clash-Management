@@ -1,15 +1,30 @@
 # Production-shaped compose file: builds and runs both app images alongside
-# their dependencies. Run from the repo root: `docker compose -f docker-compose.prod.yml up -d --build`.
+# their dependencies, plus Caddy for TLS termination. Run from the repo root:
+# `docker compose -f docker-compose.prod.yml up -d --build`.
 #
 # This is NOT a replacement for apps/api/docker-compose.yml — that file is
 # the day-to-day dev dependency stack (postgres/redis/mailhog only, apps run
 # via `npm run dev` / `npm --prefix apps/api run start:dev`) and stays as-is.
 #
-# Before first run: copy apps/api/.env.example to apps/api/.env and fill in
-# real secrets (JWT_*_SECRET at minimum) — do not use the dev placeholders
-# in production. Migrations are NOT run automatically by the api image; run
+# Before first run:
+#   1. Copy .env.prod.example (repo root) to .env and fill in POSTGRES_PASSWORD /
+#      REDIS_PASSWORD / DOMAIN / ACME_EMAIL — generate the passwords with
+#      `node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"`.
+#      Compose loads this file automatically because it's named .env in the
+#      same directory you run `docker compose` from.
+#   2. Copy apps/api/.env.example to apps/api/.env and fill in real secrets
+#      (JWT_*_SECRET, ATTACHMENT_URL_SECRET at minimum — env.validation.ts
+#      refuses to boot without them). Do not use the dev placeholders.
+#   3. Point DOMAIN's DNS A record at this host before starting Caddy, or it
+#      cannot obtain a TLS certificate.
+#
+# Migrations are NOT run automatically by the api image; run
 # `docker compose -f docker-compose.prod.yml exec api npx prisma migrate deploy`
-# once the stack is up.
+# once the stack is up. Do not run `prisma db seed` against this stack unless
+# you deliberately want the seeded demo accounts (see prisma/seed.ts's
+# NODE_ENV=production guard) — ordinary user accounts are created via the
+# Admin panel instead, which issues each one its own one-time password
+# (see UsersService.create).
 services:
   postgres:
     image: postgres:16
@@ -17,7 +32,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: clashuser
-      POSTGRES_PASSWORD: clashpass
+      # ${VAR:?message} — Compose refuses to start rather than silently
+      # falling back to a default, which is what let the old hardcoded
+      # "clashpass" ship in the first place.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env — see .env.prod.example}
       POSTGRES_DB: clashhub_db
     volumes:
       - clashhub-postgres-data:/var/lib/postgresql/data
@@ -26,12 +44,31 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 1g
 
   redis:
     image: redis:7
     restart: unless-stopped
+    # No password by default upstream — BullMQ (import/notification queues)
+    # and the rate limiter's Redis-backed storage (app.module.ts) both read
+    # REDIS_PASSWORD from apps/api/.env, which must match this.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env — see .env.prod.example}"]
     volumes:
       - clashhub-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env — see .env.prod.example}
+    deploy:
+      resources:
+        limits:
+          memory: 512m
 
   api:
     build:
@@ -42,18 +79,41 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - ./apps/api/.env
     environment:
-      DATABASE_URL: postgresql://clashuser:clashpass@postgres:5432/clashhub_db?schema=public
+      DATABASE_URL: postgresql://clashuser:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/clashhub_db?schema=public
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
       PORT: 3001
-    ports:
-      - "3001:3001"
+      # 1 hop for Caddy in front. If Next.js's rewrite proxy (web → api)
+      # turns out to append itself as a second X-Forwarded-For hop — verify
+      # this empirically once the stack is up, don't just trust this number
+      # (see HANDOFF.md / the plan's verification steps: send >5 rapid
+      # POST /api/auth/login from one real client IP and confirm the 6th
+      # gets 429 — if it doesn't, or if it 429s a different client sharing
+      # the same NAT, the hop count is wrong).
+      TRUSTED_PROXY_HOPS: 1
+    # No published port — only reachable from other containers on this
+    # compose network (web's rewrite target, and anyone running `docker
+    # compose exec`). Publishing 3001 here bypassed both Caddy's TLS and
+    # this container boundary for no benefit.
     volumes:
       - clashhub-uploads:/app/uploads
+    healthcheck:
+      # api's own base image (node:22-alpine) has no curl; BusyBox's wget
+      # (bundled with Alpine) is enough for a liveness probe.
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
 
   web:
     build:
@@ -63,40 +123,72 @@ services:
         API_ORIGIN: http://api:3001
     restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     environment:
       API_ORIGIN: http://api:3001
       PORT: 3000
-    ports:
-      - "3000:3000"
+    # No published port — Caddy is the only thing the host exposes.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/login"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
 
-  # Opt-in scheduled backups: uncomment to run scripts/backup-db.sh daily
-  # inside the stack instead of (or in addition to) an external cron job —
-  # see "Backup database" in HANDOFF.md §12 for the manual/host-cron
-  # alternative and the retention policy this script applies.
-  # backup:
-  #   image: postgres:16
-  #   container_name: clashhub-backup
-  #   restart: unless-stopped
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   environment:
-  #     PGHOST: postgres
-  #     PGUSER: clashuser
-  #     PGPASSWORD: clashpass
-  #     PGDATABASE: clashhub_db
-  #     RETENTION_DAYS: 7
-  #   volumes:
-  #     - ./backups:/backups
-  #   entrypoint: >
-  #     sh -c "while true; do
-  #       FILE=/backups/clashhub_$$(date +%Y%m%d_%H%M%S).dump;
-  #       pg_dump -F c -f \"$$FILE\" && find /backups -name '*.dump' -mtime +$$RETENTION_DAYS -delete;
-  #       sleep 86400;
-  #     done"
+  caddy:
+    image: caddy:2-alpine
+    container_name: clashhub-caddy-prod
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env — see .env.prod.example}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env — see .env.prod.example}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - clashhub-caddy-data:/data
+      - clashhub-caddy-config:/config
+
+  # Daily pg_dump inside the postgres container, pruned after RETENTION_DAYS
+  # — see scripts/backup-db.sh (the same script, run on a loop here, or
+  # invoke it manually / via host cron; either works against this same
+  # container name). Requires no password itself: pg_dump runs as a local
+  # `docker exec` inside the postgres container, authenticated via its own
+  # trusted local socket, not over the network.
+  backup:
+    image: postgres:16
+    container_name: clashhub-backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: clashuser
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      PGDATABASE: clashhub_db
+      RETENTION_DAYS: 7
+    volumes:
+      - ./backups:/backups
+    entrypoint: >
+      sh -c "while true; do
+        FILE=/backups/clashhub_$$(date +%Y%m%d_%H%M%S).dump;
+        pg_dump -F c -f \"$$FILE\" && find /backups -name '*.dump' -mtime +$$RETENTION_DAYS -delete;
+        sleep 86400;
+      done"
 
 volumes:
   clashhub-postgres-data:
   clashhub-redis-data:
   clashhub-uploads:
+  clashhub-caddy-data:
+  clashhub-caddy-config:
