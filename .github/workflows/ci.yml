@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - "feature/**"
+      - "chore/**"
+      - "fix/**"
   pull_request:
     branches:
       - main
@@ -25,11 +27,13 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
-      # Non-blocking: reports findings without failing the build. There are
-      # two known high-severity advisories in this app's dependency tree
-      # today (sharp via next's image optimizer, xlsx/SheetJS) that a hard
-      # gate would trip on permanently — xlsx has no upstream fix at all,
-      # and it's core to the PRD's export feature. See HANDOFF.md §12.
+      # Non-blocking: reports findings without failing the build. One known
+      # high-severity advisory remains in this app's dependency tree today
+      # (xlsx/SheetJS — prototype pollution + ReDoS, no upstream fix) that a
+      # hard gate would trip on permanently. Not exploitable here: xlsx is
+      # only used to *write* files client-side for export (src/lib/export.ts,
+      # json_to_sheet/writeFile), never to parse untrusted input. See
+      # HANDOFF.md §12.
       - run: npm audit --audit-level=high
         continue-on-error: true
 

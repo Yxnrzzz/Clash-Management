@@ -60,9 +60,12 @@ export class ImportProcessor extends WorkerHost {
       const { columns, rows } = importJob.format === 'xml' ? parseXml(text) : parseCsv(text);
       const colIndex = (col: string) => columns.indexOf(col);
 
+      // Status has no projectId — it's global across every project (see
+      // master-data.service.ts), so this can only ever be empty for a
+      // completely unseeded database, never "this project specifically".
       const openStatus = await this.prisma.status.findFirst({ orderBy: { sequence: 'asc' } });
       if (!openStatus) {
-        throw new Error('Belum ada status yang dikonfigurasi untuk proyek ini.');
+        throw new Error('Belum ada status yang dikonfigurasi.');
       }
 
       // Loaded once and mutated in place as autoCreate adds new rows, so
