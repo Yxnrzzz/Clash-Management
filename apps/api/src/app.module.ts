@@ -4,6 +4,7 @@ import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { BullModule } from '@nestjs/bullmq';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 import { LoggerModule } from 'nestjs-pino';
 import { PrismaModule } from './prisma/prisma.module';
 import { HealthModule } from './health/health.module';
@@ -51,7 +52,23 @@ import { envValidationSchema } from './config/env.validation';
     // being indistinguishable from normal load. Routes that need a
     // stricter ceiling (e.g. /auth/login) override it with @Throttle() —
     // see auth.controller.ts.
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 600 }]),
+    //
+    // Storage is Redis (the same instance BullMQ already connects to),
+    // not the package's in-memory default: an in-memory counter resets on
+    // every restart/deploy and isn't shared across replicas, so either
+    // gap would let a client simply outlast or outrun the limit.
+    ThrottlerModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        throttlers: [{ ttl: 60_000, limit: 600 }],
+        storage: new ThrottlerStorageRedisService({
+          host: config.get<string>('REDIS_HOST') ?? 'localhost',
+          port: config.get<number>('REDIS_PORT') ?? 6379,
+          password: config.get<string>('REDIS_PASSWORD') || undefined,
+        }),
+      }),
+    }),
     BullModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -59,6 +76,7 @@ import { envValidationSchema } from './config/env.validation';
         connection: {
           host: config.get<string>('REDIS_HOST') ?? 'localhost',
           port: config.get<number>('REDIS_PORT') ?? 6379,
+          password: config.get<string>('REDIS_PASSWORD') || undefined,
         },
       }),
     }),

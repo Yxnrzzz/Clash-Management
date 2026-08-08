@@ -22,9 +22,12 @@ import { FilterChipGroup } from "./FilterChips";
 import { BulkToolbar } from "./BulkToolbar";
 
 const PAGE_SIZE = 10;
-/** Cap matches the backend DTO's pageSize max — lets export reuse GET /clashes
- * unpaginated instead of needing a second endpoint. */
-const EXPORT_PAGE_SIZE = 10000;
+/** Passed to buildQueryParams() for the export request too, but GET
+ * /clashes/export ignores page/pageSize entirely — it returns every
+ * matching row up to its own server-side cap (see ClashesService.export()).
+ * Any value within the DTO's pageSize range works here; this just keeps
+ * the request well-formed. */
+const EXPORT_PAGE_SIZE = 500;
 
 const SORTABLE_FIELDS = new Set([
   "kodeUnik",
@@ -294,7 +297,7 @@ export function RegisterView() {
   const fetchAllMatching = useCallback(async (): Promise<Clash[]> => {
     const params = buildQueryParams(filters, EXPORT_PAGE_SIZE);
     params.set("page", "1");
-    const res = await apiGet<ApiClashListResponse>(`/clashes?${params.toString()}`);
+    const res = await apiGet<ApiClashListResponse>(`/clashes/export?${params.toString()}`);
     return res.data.map(toClash);
   }, [filters]);
 

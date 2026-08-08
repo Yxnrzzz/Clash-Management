@@ -1,10 +1,23 @@
 import { Readable } from 'stream';
+import { promises as fs } from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { ImportService } from './import.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { AuthUser } from '../auth/auth.types';
+
+/** preview() now reads the upload from disk (diskStorage, not multer's old
+ * in-memory buffer) — writes a real temp file so `file.path` resolves to
+ * something readable, the same way multer would have staged it. */
+async function writeTempFile(content: string): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'clashhub-import-test-'));
+  const filePath = path.join(dir, 'upload');
+  await fs.writeFile(filePath, content, 'utf-8');
+  return filePath;
+}
 
 const PROJECT = { id: 'proj-1', code: 'MCA', createdAt: new Date('2026-01-01') };
 const admin: AuthUser = { id: 'u-admin', email: 'admin@clashhub.dev', role: Role.ADMIN };
@@ -22,7 +35,7 @@ function makeHarness(opts: { storedFileText?: string } = {}) {
   } as unknown as PrismaService;
 
   const storage = {
-    save: jest.fn(() => Promise.resolve({ key: 'imports/uuid-file.csv' })),
+    saveFromPath: jest.fn(() => Promise.resolve({ key: 'imports/uuid-file.csv' })),
     readStream: jest.fn(() =>
       Readable.from([Buffer.from(opts.storedFileText ?? 'judul,disiplin\nA,MEP', 'utf-8')]),
     ),
@@ -46,14 +59,12 @@ const VALID_MAPPING = {
 describe('ImportService.preview', () => {
   it('parses the file, stores it, and returns a suggested mapping', async () => {
     const { service, storage } = makeHarness();
-    const file = {
-      originalname: 'clashes.csv',
-      buffer: Buffer.from('judul,disiplin,zona,prioritas,deskripsi\nA,MEP,Z1,High,Desc', 'utf-8'),
-    } as Express.Multer.File;
+    const filePath = await writeTempFile('judul,disiplin,zona,prioritas,deskripsi\nA,MEP,Z1,High,Desc');
+    const file = { originalname: 'clashes.csv', path: filePath } as Express.Multer.File;
 
     const result = await service.preview(file);
 
-    expect(storage.save).toHaveBeenCalledWith(file.buffer, 'imports', 'clashes.csv');
+    expect(storage.saveFromPath).toHaveBeenCalledWith(filePath, 'imports', 'clashes.csv');
     expect(result.token).toBe('imports/uuid-file.csv');
     expect(result.format).toBe('csv');
     expect(result.columns).toEqual(['judul', 'disiplin', 'zona', 'prioritas', 'deskripsi']);
@@ -69,7 +80,8 @@ describe('ImportService.preview', () => {
 
   it('rejects a file with no readable columns', async () => {
     const { service } = makeHarness();
-    const file = { originalname: 'empty.csv', buffer: Buffer.from('', 'utf-8') } as Express.Multer.File;
+    const filePath = await writeTempFile('');
+    const file = { originalname: 'empty.csv', path: filePath } as Express.Multer.File;
     await expect(service.preview(file)).rejects.toThrow(BadRequestException);
   });
 });

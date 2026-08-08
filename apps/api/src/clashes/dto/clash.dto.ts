@@ -1,5 +1,6 @@
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   ArrayNotEmpty,
   IsArray,
@@ -119,6 +120,10 @@ export class BulkUpdateClashDto {
   @IsArray()
   @ArrayNotEmpty({ message: 'Pilih minimal satu clash' })
   @ArrayMinSize(1)
+  // Matches the Register's own page size by a wide margin — bounds how much
+  // work one request can trigger (each id fans out into its own DB write +
+  // audit log row + notification), not a realistic selection size.
+  @ArrayMaxSize(200, { message: 'Maksimal 200 clash per bulk update' })
   @IsUUID(undefined, { each: true, message: 'ID clash tidak valid' })
   ids!: string[];
 
@@ -136,13 +141,17 @@ export class CreateCommentDto {
 const SORTABLE_FIELDS = ['kodeUnik', 'judul', 'status', 'priority', 'dueDate', 'createdAt'] as const;
 
 /**
- * Query params for GET /clashes. Mirrors the shape RegisterView.tsx already
- * builds for its URL (see FiltersState in RegisterView.tsx) so the frontend
- * can forward its filter state to the server almost verbatim.
+ * Query params for GET /clashes (and GET /clashes/export, which reuses this
+ * same DTO for its filters — see ClashesService.export()). Mirrors the shape
+ * RegisterView.tsx already builds for its URL (see FiltersState in
+ * RegisterView.tsx) so the frontend can forward its filter state to the
+ * server almost verbatim.
  *
- * pageSize's cap (10000, not the register's page size of 10) is what lets
- * export reuse this same endpoint instead of needing a second one: export
- * asks for page=1&pageSize=10000 to get every matching row unpaginated.
+ * pageSize's cap used to be 10000 so export could reuse this endpoint
+ * unpaginated (page=1&pageSize=10000) — that let one authenticated user
+ * repeatedly request the DB's most expensive possible page size. Export now
+ * has its own endpoint with its own (server-side, not client-supplied) row
+ * cap, so this can go back to bounding an actual page render.
  */
 export class ListClashesQueryDto {
   @IsOptional()
@@ -219,7 +228,7 @@ export class ListClashesQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(10000)
+  @Max(500)
   pageSize = 10;
 }
 

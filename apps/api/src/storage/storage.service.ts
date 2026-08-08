@@ -1,18 +1,23 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron } from '@nestjs/schedule';
 import { createReadStream, promises as fs, ReadStream } from 'fs';
 import * as path from 'path';
 import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
+import { UPLOAD_TMP_DIR } from './upload-tmp-dir';
 
 const DEFAULT_SIGNED_URL_TTL_MS = 5 * 60 * 1000;
+const ORPHAN_TMP_FILE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Local-disk implementation. Kept as a thin, single-purpose service so a
  * later swap to S3/R2 only means replacing this file — callers only ever
- * see `save()`/`readStream()`, never a filesystem path.
+ * see `saveFromPath()`/`readStream()`, never a filesystem path of their own
+ * choosing.
  */
 @Injectable()
 export class StorageService {
+  private readonly logger = new Logger(StorageService.name);
   private readonly root: string;
   private readonly urlSecret: string;
 
@@ -51,13 +56,33 @@ export class StorageService {
     return createHmac('sha256', this.urlSecret).update(`${key}|${expiresAt}`).digest('hex');
   }
 
-  async save(buffer: Buffer, clashId: string, originalName: string): Promise<{ key: string }> {
+  /**
+   * Moves a file multer already wrote to disk (via diskStorage — see
+   * upload-tmp-dir.ts) into its permanent location under UPLOAD_DIR, rather
+   * than taking the whole upload as an in-memory Buffer. Attachments and
+   * import files are allowed up to 10MB each, several per request — buffering
+   * all of that in process memory made concurrent uploads an easy way to
+   * pressure the process's RSS; staging to disk first bounds that to what
+   * the OS's page cache is willing to hold.
+   */
+  async saveFromPath(tmpPath: string, prefix: string, originalName: string): Promise<{ key: string }> {
     const safeName = originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const key = path.posix.join(clashId, `${randomUUID()}-${safeName}`);
+    const key = path.posix.join(prefix, `${randomUUID()}-${safeName}`);
     const absolutePath = path.join(this.root, key);
 
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    await fs.writeFile(absolutePath, buffer);
+    try {
+      await fs.rename(tmpPath, absolutePath);
+    } catch (error) {
+      // EXDEV: tmpPath and UPLOAD_DIR live on different filesystems/volumes,
+      // which rename() can't cross (e.g. UPLOAD_TMP_DIR and UPLOAD_DIR
+      // pointed at separate mounted volumes) — copy then remove the
+      // original as a fallback. Any other error is a real failure and
+      // should propagate.
+      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
+      await fs.copyFile(tmpPath, absolutePath);
+      await fs.unlink(tmpPath);
+    }
 
     return { key };
   }
@@ -87,5 +112,38 @@ export class StorageService {
     // no-op, not an error. No `recursive`: if a key somehow resolved to a
     // directory, fs.rm throws here rather than wiping it.
     await fs.rm(absolute, { force: true });
+  }
+
+  /**
+   * multer's diskStorage (see upload-tmp-dir.ts) writes an upload to
+   * UPLOAD_TMP_DIR before saveFromPath() moves it under UPLOAD_DIR; a
+   * request that fails between those two steps (validation error, process
+   * crash, client disconnect mid-upload) leaves the temp file behind
+   * forever otherwise. Daily sweep, matching OverdueScannerService's cadence
+   * — nothing here is time-sensitive enough to need tighter than that, and
+   * a 24h grace period comfortably outlives any in-flight request.
+   */
+  @Cron('30 3 * * *')
+  async cleanupOrphanedTempFiles(): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(UPLOAD_TMP_DIR);
+    } catch (error) {
+      this.logger.warn(`Gagal membaca direktori sementara: ${(error as Error).message}`);
+      return;
+    }
+
+    const cutoff = Date.now() - ORPHAN_TMP_FILE_MAX_AGE_MS;
+    for (const entry of entries) {
+      const absolute = path.join(UPLOAD_TMP_DIR, entry);
+      try {
+        const stat = await fs.stat(absolute);
+        if (stat.isFile() && stat.mtimeMs < cutoff) {
+          await fs.unlink(absolute);
+        }
+      } catch (error) {
+        this.logger.warn(`Gagal membersihkan file sementara ${entry}: ${(error as Error).message}`);
+      }
+    }
   }
 }

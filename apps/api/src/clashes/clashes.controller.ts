@@ -14,6 +14,9 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
+import { Throttle } from '@nestjs/throttler';
+import { diskStorage } from 'multer';
+import { unlink } from 'fs/promises';
 import type { Response } from 'express';
 import { Role } from '@prisma/client';
 import { ActiveProject } from '../common/decorators/active-project.decorator';
@@ -21,6 +24,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { AuthUser } from '../auth/auth.types';
+import { UPLOAD_TMP_DIR } from '../storage/upload-tmp-dir';
 import {
   BulkUpdateClashDto,
   CreateClashDto,
@@ -60,6 +64,22 @@ export class ClashesController {
   @Get('metrics')
   metrics(@Query() query: DashboardMetricsQueryDto, @ActiveProject() projectId: string) {
     return this.clashes.metrics(query, projectId);
+  }
+
+  // Also must come before @Get(':id'), same reasoning as metrics above.
+  // Backs the Register's Excel/PDF export — see ClashesService.export() for
+  // why this is a separate route from list() rather than list() called with
+  // a huge pageSize. Throttled well below the global default: even capped
+  // at EXPORT_MAX_ROWS, this is a meaningfully heavier query than a normal
+  // paginated page.
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Get('export')
+  export(
+    @Query() query: ListClashesQueryDto,
+    @ActiveProject() projectId: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.clashes.export(query, projectId, user);
   }
 
   @Get(':id')
@@ -130,11 +150,17 @@ export class ClashesController {
   }
 
   // Server-side re-validation of type/size/count: the frontend's own checks
-  // (clashes/new/page.tsx) are UX only, not a security boundary.
+  // (clashes/new/page.tsx) are UX only, not a security boundary. Throttled
+  // below the global default — up to 10 files x 10MB per call is far
+  // costlier than a typical request.
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Roles(Role.ENGINEER, Role.COORDINATOR, Role.ADMIN)
   @Post(':id/attachments')
   @UseInterceptors(
-    FilesInterceptor('files', MAX_ATTACHMENTS, { limits: { fileSize: MAX_ATTACHMENT_SIZE_BYTES } }),
+    FilesInterceptor('files', MAX_ATTACHMENTS, {
+      storage: diskStorage({ destination: UPLOAD_TMP_DIR }),
+      limits: { fileSize: MAX_ATTACHMENT_SIZE_BYTES },
+    }),
   )
   addAttachments(
     @Param('id') id: string,
@@ -144,6 +170,11 @@ export class ClashesController {
   ) {
     for (const file of files) {
       if (!ACCEPTED_ATTACHMENT_TYPES.some((t) => file.mimetype.startsWith(t))) {
+        // Multer's diskStorage already wrote every file in this batch to
+        // UPLOAD_TMP_DIR before this handler runs — clean all of them up
+        // now instead of leaving them for the daily orphan-file sweep just
+        // because one had the wrong type.
+        for (const f of files) void unlink(f.path).catch(() => undefined);
         throw new BadRequestException('Tipe file harus gambar atau PDF');
       }
     }

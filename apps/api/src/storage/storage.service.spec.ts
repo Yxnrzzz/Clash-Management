@@ -72,6 +72,41 @@ describe('StorageService signed URLs', () => {
   });
 });
 
+/** Writes a source file to be handed to saveFromPath() — a separate
+ * directory from UPLOAD_DIR, mirroring how UPLOAD_TMP_DIR and UPLOAD_DIR
+ * are two distinct directories in real use (see upload-tmp-dir.ts). */
+async function writeSourceFile(content: string): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'clashhub-storage-src-'));
+  const filePath = path.join(dir, 'upload');
+  await fs.writeFile(filePath, content);
+  return filePath;
+}
+
+describe('StorageService.saveFromPath', () => {
+  let uploadDir: string;
+
+  beforeEach(async () => {
+    uploadDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clashhub-storage-test-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(uploadDir, { recursive: true, force: true });
+  });
+
+  it('moves the file into UPLOAD_DIR under a randomized, sanitized name', async () => {
+    const service = makeServiceWithUploadDir(uploadDir);
+    const sourcePath = await writeSourceFile('hello');
+
+    const { key } = await service.saveFromPath(sourcePath, 'clash-1', 'my photo!.png');
+
+    expect(key.startsWith('clash-1' + path.posix.sep)).toBe(true);
+    expect(key.endsWith('-my_photo_.png')).toBe(true);
+    expect(await fs.readFile(path.join(uploadDir, key), 'utf-8')).toBe('hello');
+    // Moves, not copies — the source path is gone afterward.
+    await expect(fs.readFile(sourcePath, 'utf-8')).rejects.toThrow();
+  });
+});
+
 describe('StorageService.delete', () => {
   let uploadDir: string;
 
@@ -83,9 +118,10 @@ describe('StorageService.delete', () => {
     await fs.rm(uploadDir, { recursive: true, force: true });
   });
 
-  it('removes a file previously written by save()', async () => {
+  it('removes a file previously written by saveFromPath()', async () => {
     const service = makeServiceWithUploadDir(uploadDir);
-    const { key } = await service.save(Buffer.from('hello'), 'clash-1', 'photo.png');
+    const sourcePath = await writeSourceFile('hello');
+    const { key } = await service.saveFromPath(sourcePath, 'clash-1', 'photo.png');
     const absolutePath = path.join(uploadDir, key);
     expect(await fs.readFile(absolutePath, 'utf-8')).toBe('hello');
 

@@ -24,6 +24,10 @@ type PatchableField = 'statusId' | 'priorityId' | 'assigneeId' | 'dueDate';
 type PatchValue = string | null | undefined;
 type Patch = Partial<Record<PatchableField, PatchValue>>;
 
+/** Hard ceiling on ClashesService.export() regardless of how many rows a
+ * filter set actually matches — see that method's comment. */
+const EXPORT_MAX_ROWS = 5000;
+
 interface Slice {
   id: string;
   label: string;
@@ -112,9 +116,7 @@ export class ClashesService {
 
   /**
    * Filters/sorts/paginates server-side — see RegisterView.tsx's FiltersState
-   * for the param shape this mirrors. pageSize can go up to 10000 (see the
-   * DTO), which is what lets the Register's export buttons reuse this same
-   * method (page=1&pageSize=10000) instead of a separate unpaginated route.
+   * for the param shape this mirrors.
    *
    * `query.deleted` switches from the normal (non-deleted) list to the
    * trash bin — Admin only, since it's the only role that can restore.
@@ -134,6 +136,31 @@ export class ClashesService {
         skip: (query.page - 1) * query.pageSize,
         take: query.pageSize,
       }),
+      this.prisma.clash.count({ where }),
+    ]);
+
+    return { data, total };
+  }
+
+  /**
+   * Same filters/sort as list() but unpaginated (up to EXPORT_MAX_ROWS) —
+   * backs the Register's Excel/PDF export buttons. Its own endpoint/method
+   * rather than list() with a huge pageSize (the old approach): that let one
+   * authenticated user repeatedly request the DB's most expensive possible
+   * page, and the row cap here is enforced server-side instead of trusting
+   * whatever pageSize the client sends. `total` may exceed the returned
+   * `data.length` if a filter set matches more than EXPORT_MAX_ROWS rows.
+   */
+  async export(query: ListClashesQueryDto, projectId: string, user: AuthUser) {
+    if (query.deleted && user.role !== Role.ADMIN) {
+      throw new ForbiddenException('Hanya Admin yang dapat melihat clash yang terhapus.');
+    }
+
+    const where = this.buildListWhere(projectId, query);
+    const orderBy = this.buildListOrderBy(query.sort, query.dir);
+
+    const [data, total] = await Promise.all([
+      this.prisma.clash.findMany({ where, orderBy, take: EXPORT_MAX_ROWS }),
       this.prisma.clash.count({ where }),
     ]);
 
@@ -354,7 +381,7 @@ export class ClashesService {
 
     const created = [];
     for (const file of files) {
-      const { key } = await this.storage.save(file.buffer, clash.id, file.originalname);
+      const { key } = await this.storage.saveFromPath(file.path, clash.id, file.originalname);
       const attachment = await this.prisma.$transaction(async (tx) => {
         const row = await tx.attachment.create({
           data: {

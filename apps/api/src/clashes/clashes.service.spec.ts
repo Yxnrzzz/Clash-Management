@@ -8,7 +8,7 @@ import { AuthUser } from '../auth/auth.types';
 import { DashboardMetricsQueryDto, ListClashesQueryDto } from './dto/clash.dto';
 
 const fakeStorage = {
-  save: jest.fn(() => Promise.resolve({ key: 'clash-1/fake-key.png' })),
+  saveFromPath: jest.fn(() => Promise.resolve({ key: 'clash-1/fake-key.png' })),
   readStream: jest.fn(),
   signKey: jest.fn((key: string) => ({ token: `signed(${key})`, expiresAt: Date.now() + 300_000 })),
   verifySignedKey: jest.fn((key: string, token: string) => token === `signed(${key})`),
@@ -604,6 +604,62 @@ describe('ClashesService.list', () => {
   });
 });
 
+describe('ClashesService.export', () => {
+  it('applies the same filters as list() but ignores page/pageSize, capping take at EXPORT_MAX_ROWS', async () => {
+    const rows = [baseClash({ id: 'c1' })];
+    const findMany = jest.fn(() => Promise.resolve(rows));
+    const count = jest.fn(() => Promise.resolve(1));
+    const prisma = { clash: { findMany, count } } as unknown as PrismaService;
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    const result = await service.export(
+      { disc: ['disc-ars'], sort: 'status', dir: 'asc', page: 3, pageSize: 500 } as ListClashesQueryDto,
+      PROJECT.id,
+      engineer,
+    );
+
+    expect(result).toEqual({ data: rows, total: 1 });
+    // Exact-match (not objectContaining) on the whole call — proves there's
+    // no `skip` key at all, so every call gets page 1 regardless of what
+    // `page` the caller supplied, since export never paginates.
+    expect(findMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ projectId: PROJECT.id, disciplineId: { in: ['disc-ars'] } }),
+      orderBy: { status: { sequence: 'asc' } },
+      take: 5000,
+    });
+  });
+
+  it('reports the true match count even when it exceeds what was returned', async () => {
+    const rows = [baseClash({ id: 'c1' })];
+    const findMany = jest.fn(() => Promise.resolve(rows));
+    const count = jest.fn(() => Promise.resolve(7_000));
+    const prisma = { clash: { findMany, count } } as unknown as PrismaService;
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    const result = await service.export(
+      { sort: 'createdAt', dir: 'desc', page: 1, pageSize: 10 } as ListClashesQueryDto,
+      PROJECT.id,
+      engineer,
+    );
+
+    expect(result.total).toBe(7_000);
+    expect(result.data).toHaveLength(1);
+  });
+
+  it('rejects a non-Admin requesting the trash-bin view, same as list()', async () => {
+    const prisma = { clash: { findMany: jest.fn(), count: jest.fn() } } as unknown as PrismaService;
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    await expect(
+      service.export(
+        { sort: 'createdAt', dir: 'desc', page: 1, pageSize: 10, deleted: true } as ListClashesQueryDto,
+        PROJECT.id,
+        coordinator,
+      ),
+    ).rejects.toThrow(ForbiddenException);
+  });
+});
+
 describe('ClashesService.metrics', () => {
   it('aggregates totals, MTTR, overdue count, weekly trend, and zero-filled slices', async () => {
     const clashes = [
@@ -688,12 +744,12 @@ describe('ClashesService.addAttachments', () => {
     const { prisma, attachment } = makePrisma(baseClash());
     const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
     const files = [
-      { originalname: 'photo.png', mimetype: 'image/png', size: 1024, buffer: Buffer.from('x') },
+      { originalname: 'photo.png', mimetype: 'image/png', size: 1024, path: '/tmp/upload-abc123' },
     ] as Express.Multer.File[];
 
     const created = await service.addAttachments('clash-1', files, engineer, PROJECT.id);
 
-    expect(fakeStorage.save).toHaveBeenCalledWith(files[0].buffer, 'clash-1', 'photo.png');
+    expect(fakeStorage.saveFromPath).toHaveBeenCalledWith(files[0].path, 'clash-1', 'photo.png');
     expect(attachment.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         clashId: 'clash-1',

@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { promises as fs } from 'fs';
 import { Prisma, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
@@ -63,24 +64,37 @@ export class ImportService {
   async preview(file: Express.Multer.File | undefined) {
     if (!file) throw new BadRequestException('File tidak ditemukan.');
 
-    const format = detectImportFormat(file.originalname);
-    const { columns, rows } = parseTable(format, file.buffer.toString('utf-8'));
+    try {
+      const format = detectImportFormat(file.originalname);
+      const text = await fs.readFile(file.path, 'utf-8');
+      const { columns, rows } = parseTable(format, text);
 
-    if (columns.length === 0) {
-      throw new BadRequestException('File tidak berisi kolom yang bisa dibaca.');
+      if (columns.length === 0) {
+        throw new BadRequestException('File tidak berisi kolom yang bisa dibaca.');
+      }
+
+      const { key } = await this.storage.saveFromPath(file.path, STORAGE_PREFIX, file.originalname);
+
+      return {
+        token: key,
+        fileName: file.originalname,
+        format,
+        columns,
+        sampleRows: rows.slice(0, MAX_PREVIEW_SAMPLE_ROWS),
+        totalRows: rows.length,
+        suggestedMapping: suggestMapping(columns),
+      };
+    } catch (error) {
+      // A malformed/empty upload is a common user error, not a rare fault —
+      // worth cleaning up immediately rather than leaving it for the daily
+      // orphan-file sweep. saveFromPath() moves (renames) the file out of
+      // its temp path on success, so by the time any error could reach
+      // here the file is either still at its original temp path (safe to
+      // unlink) or already gone (unlink is a harmless no-op-ish failure,
+      // swallowed below).
+      await fs.unlink(file.path).catch(() => undefined);
+      throw error;
     }
-
-    const { key } = await this.storage.save(file.buffer, STORAGE_PREFIX, file.originalname);
-
-    return {
-      token: key,
-      fileName: file.originalname,
-      format,
-      columns,
-      sampleRows: rows.slice(0, MAX_PREVIEW_SAMPLE_ROWS),
-      totalRows: rows.length,
-      suggestedMapping: suggestMapping(columns),
-    };
   }
 
   /**

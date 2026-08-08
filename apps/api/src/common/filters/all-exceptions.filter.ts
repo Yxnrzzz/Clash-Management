@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { MulterError } from 'multer';
 import * as Sentry from '@sentry/node';
 import type { Response } from 'express';
 
@@ -54,9 +55,44 @@ export class AllExceptionsFilter implements ExceptionFilter {
       return this.resolvePrismaError(exception);
     }
 
+    // Multer's own limits (MAX_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS, …in
+    // clashes.controller.ts / import.controller.ts) throw MulterError, not
+    // an HttpException — without this it fell through to a generic 500,
+    // which is wrong (it's a client error, "file too big") and gets logged
+    // to Sentry as if it were a real fault.
+    if (exception instanceof MulterError) {
+      return this.resolveMulterError(exception);
+    }
+
+    // main.ts's body-parser limit (see useBodyParser) rejects an oversized
+    // JSON/urlencoded body by throwing a plain http-errors object — same
+    // "silently becomes a 500" gap as MulterError above, just from a
+    // different library. http-errors doesn't export a class to instanceof
+    // against here, so this checks the `type` marker it sets instead (see
+    // node_modules/raw-body's use of createError(413, …, { type: 'entity.too.large' })).
+    if (exception instanceof Error && (exception as { type?: string }).type === 'entity.too.large') {
+      return {
+        status: HttpStatus.PAYLOAD_TOO_LARGE,
+        body: { statusCode: 413, message: 'Ukuran permintaan terlalu besar.' },
+      };
+    }
+
     return {
       status: HttpStatus.INTERNAL_SERVER_ERROR,
       body: { statusCode: 500, message: 'Terjadi kesalahan pada server.' },
+    };
+  }
+
+  private resolveMulterError(error: MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return {
+        status: HttpStatus.PAYLOAD_TOO_LARGE,
+        body: { statusCode: 413, message: 'Ukuran file melebihi batas maksimum.' },
+      };
+    }
+    return {
+      status: HttpStatus.BAD_REQUEST,
+      body: { statusCode: 400, message: 'Berkas yang diunggah tidak valid.' },
     };
   }
 
