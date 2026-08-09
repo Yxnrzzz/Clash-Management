@@ -1,9 +1,17 @@
 "use client";
 
 import { useRef, useState } from "react";
-import type { Attachment, Role, User } from "@/lib/types";
-import { canDeleteAttachment, canUploadAttachment, formatBytes } from "@/lib/lookup";
+import type { Attachment, AttachmentRole, Role, User } from "@/lib/types";
+import {
+  ATTACHMENT_ROLE_LABEL,
+  canDeleteAttachment,
+  canManageAttachment,
+  canUploadAttachment,
+  formatBytes,
+} from "@/lib/lookup";
 import { MAX_FILES, MAX_FILE_MB, validateAttachmentFile } from "@/lib/attachments";
+
+const ROLE_OPTIONS: AttachmentRole[] = ["OTHER", "ORIGINAL", "CLASH_DETECTION"];
 
 export function AttachmentPanel({
   attachments,
@@ -14,6 +22,7 @@ export function AttachmentPanel({
   onUpload,
   onDelete,
   onPreview,
+  onRoleChange,
 }: {
   attachments: Attachment[];
   previewUrls: Record<string, string>;
@@ -23,6 +32,8 @@ export function AttachmentPanel({
   onUpload: (files: File[]) => Promise<void>;
   onDelete: (attachmentId: string) => Promise<void>;
   onPreview?: (attachmentId: string) => void;
+  /** Absent = the role picker is hidden entirely (e.g. a read-only view). */
+  onRoleChange?: (attachmentId: string, role: AttachmentRole) => Promise<void>;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -30,6 +41,17 @@ export function AttachmentPanel({
   const [uploading, setUploading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [savingRoleId, setSavingRoleId] = useState<string | null>(null);
+
+  async function handleRoleChange(attachmentId: string, role: AttachmentRole) {
+    if (!onRoleChange) return;
+    setSavingRoleId(attachmentId);
+    try {
+      await onRoleChange(attachmentId, role);
+    } finally {
+      setSavingRoleId(null);
+    }
+  }
 
   const canUpload = canUploadAttachment(userRole);
 
@@ -120,10 +142,11 @@ export function AttachmentPanel({
             const previewUrl = previewUrls[a.id];
             const canDelete = canDeleteAttachment(userRole, a.uploadedBy, userId);
             return (
-              <li
-                key={a.id}
-                className="flex items-center gap-3 rounded-lg border border-zinc-200 p-3"
-              >
+              // Kolom, bukan baris: picker peran butuh lebarnya sendiri.
+              // Ditaruh sebaris dengan nama file dan tombol aksi, teksnya
+              // terpotong jadi "Ori…" / "Clas…" di kartu grid dua kolom.
+              <li key={a.id} className="rounded-lg border border-zinc-200 p-3">
+                <div className="flex items-center gap-3">
                 {previewUrl && a.tipe === "image" ? (
                   <button
                     type="button"
@@ -150,7 +173,7 @@ export function AttachmentPanel({
                 )}
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-zinc-700">{a.namaFile}</p>
-                  <p className="text-xs text-zinc-400">
+                  <p className="truncate text-xs text-zinc-400">
                     {formatBytes(a.ukuranBytes)} · diunggah oleh {userById(a.uploadedBy)?.nama}
                   </p>
                 </div>
@@ -173,6 +196,35 @@ export function AttachmentPanel({
                     Hapus
                   </button>
                 )}
+                </div>
+
+                {onRoleChange &&
+                  (canManageAttachment(userRole, a.uploadedBy, userId) ? (
+                    <label className="mt-2 flex items-center gap-2">
+                      <span className="shrink-0 text-xs text-zinc-400">Kolom laporan</span>
+                      <select
+                        aria-label={`Peran laporan untuk ${a.namaFile}`}
+                        value={a.role}
+                        disabled={savingRoleId === a.id}
+                        onChange={(e) =>
+                          void handleRoleChange(a.id, e.target.value as AttachmentRole)
+                        }
+                        className="min-w-0 flex-1 rounded border border-zinc-200 bg-white px-2 py-1 text-xs text-zinc-600 disabled:opacity-50"
+                      >
+                        {ROLE_OPTIONS.map((r) => (
+                          <option key={r} value={r}>
+                            {ATTACHMENT_ROLE_LABEL[r]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    a.role !== "OTHER" && (
+                      <span className="mt-2 inline-block rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-500">
+                        {ATTACHMENT_ROLE_LABEL[a.role]}
+                      </span>
+                    )
+                  ))}
               </li>
             );
           })}

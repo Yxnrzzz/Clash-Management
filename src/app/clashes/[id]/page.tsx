@@ -7,7 +7,14 @@ import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
 import { useMasterDataLookups } from "@/lib/use-master-data";
 import { apiGet } from "@/lib/api/client";
-import { canDeleteClash, canEditClash, formatDateTime, isAssignable } from "@/lib/lookup";
+import {
+  ATTACHMENT_ROLE_LABEL,
+  canDeleteClash,
+  canEditClash,
+  formatDateTime,
+  isAssignable,
+} from "@/lib/lookup";
+import type { AttachmentRole } from "@/lib/types";
 import { PriorityBadge, StatusBadge, OverdueBadge } from "@/components/Badge";
 import { DeleteClashDialog } from "@/components/clashes/DeleteClashDialog";
 import { AttachmentPanel } from "@/components/clashes/AttachmentPanel";
@@ -32,6 +39,7 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     deleteClash,
     uploadAttachments,
     deleteAttachment,
+    updateAttachmentRole,
   } = useData();
   const { priorities, disciplineById, zoneById, statusById, priorityById, userById, isOverdue, allowedStatusTransitions } =
     useMasterDataLookups();
@@ -168,6 +176,34 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     }
   }
 
+  async function handleAttachmentRoleChange(attachmentId: string, role: AttachmentRole) {
+    setActionError(null);
+    try {
+      await updateAttachmentRole(clashId, attachmentId, role);
+    } catch {
+      setActionError("Gagal mengubah peran lampiran. Periksa koneksi dan coba lagi.");
+    }
+  }
+
+  /**
+   * Disimpan saat blur, bukan saat mengetik: updateClashField memicu
+   * loadClashDetail() di setiap panggilan (lihat data-context), jadi
+   * menyimpan per-ketikan berarti badai fetch.
+   */
+  async function handleResolveBlur(
+    field: "resolveProposed" | "resolveByConsultant",
+    value: string
+  ) {
+    const current = clash[field] ?? "";
+    if (value === current) return;
+    setActionError(null);
+    try {
+      await updateClashField(clashId, field, value, userId);
+    } catch {
+      setActionError("Gagal menyimpan catatan penyelesaian. Periksa koneksi dan coba lagi.");
+    }
+  }
+
   function fieldLabel(field: string) {
     return {
       assigneeId: "Assignee",
@@ -175,6 +211,8 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
       dueDate: "Due Date",
       statusId: "Status",
       uniqueCode: "Kode Unik",
+      resolveProposed: "Resolve (TATA Proposed)",
+      resolveByConsultant: "Resolve by Consultant",
     }[field] ?? field;
   }
 
@@ -186,6 +224,13 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     if (entry.aksi === "restored") return `${actor} memulihkan clash ini.`;
     if (entry.aksi === "attachment_added") return `${actor} menambahkan lampiran "${entry.nilaiBaru}".`;
     if (entry.aksi === "attachment_deleted") return `${actor} menghapus lampiran "${entry.nilaiLama}".`;
+    if (entry.aksi === "attachment_role_changed") {
+      const roleLabel = (v?: string) =>
+        v && v in ATTACHMENT_ROLE_LABEL
+          ? ATTACHMENT_ROLE_LABEL[v as AttachmentRole]
+          : (v ?? "-");
+      return `${actor} mengubah peran lampiran "${entry.field}" dari "${roleLabel(entry.nilaiLama)}" ke "${roleLabel(entry.nilaiBaru)}".`;
+    }
     if (entry.aksi === "code_changed") {
       return `Kode clash berubah dari "${entry.nilaiLama}" ke "${entry.nilaiBaru}" karena kode proyek atau disiplin diganti.`;
     }
@@ -231,6 +276,38 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
             </p>
           </section>
 
+          {/* Dua kolom laporan "Tabel Clash Detection". Ditaruh di kolom kiri
+              yang lebar, bukan di <dl> kanan: isinya kalimat, bukan nilai
+              pendek. Label sengaja memakai judul kolom laporan persis supaya
+              yang mengisi tahu ke mana teksnya akan tercetak. */}
+          <section className="rounded-2xl border border-zinc-200 bg-white p-5">
+            <h2 className="text-sm font-semibold text-zinc-700">Penyelesaian</h2>
+            <p className="mt-1 text-xs text-zinc-400">
+              Tercetak di kolom laporan clash. Disimpan otomatis saat Anda berpindah kolom.
+            </p>
+
+            <div className="mt-4 space-y-4">
+              <ResolveField
+                label="Resolve (TATA Proposed)"
+                value={clash.resolveProposed}
+                editable={editable}
+                placeholder="Usulan penyelesaian dari pihak TATA…"
+                onCommit={(v) => handleResolveBlur("resolveProposed", v)}
+              />
+              <ResolveField
+                label="Resolve by Consultant"
+                value={clash.resolveByConsultant}
+                // Engineer boleh mengusulkan tapi tidak mencatat jawaban
+                // konsultan — transkripsi tangan kedua adalah cara laporan
+                // salah mengutip pihak eksternal. Server menegakkan hal yang
+                // sama di buildAllowedPatch().
+                editable={editable && user.peran !== "Engineer"}
+                placeholder="Jawaban resmi dari konsultan…"
+                onCommit={(v) => handleResolveBlur("resolveByConsultant", v)}
+              />
+            </div>
+          </section>
+
           <section className="rounded-2xl border border-zinc-200 bg-white">
             <div className="flex border-b border-zinc-200 px-2">
               {(
@@ -267,6 +344,12 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                   onPreview={(attachmentId) =>
                     setPreviewIndex(clashAttachments.findIndex((a) => a.id === attachmentId))
                   }
+                  // Bukan `editable`: menandai lampiran mengikuti aturan
+                  // lampiran (pengunggah), bukan aturan edit clash
+                  // (assignee/reporter) — sama seperti unggah dan hapus.
+                  // AttachmentPanel yang memutuskan per baris; Management
+                  // tidak lolos canManageAttachment sehingga hanya melihat badge.
+                  onRoleChange={handleAttachmentRoleChange}
                 />
               )}
 
@@ -489,6 +572,75 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
           currentUser={{ id: user.id, peran: user.peran }}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * Satu textarea resolve dengan draft lokal.
+ *
+ * Draft-nya perlu karena menyimpan setiap ketikan berarti satu PATCH plus
+ * satu loadClashDetail() per huruf — lihat handleResolveBlur.
+ *
+ * Sinkronisasi nilai server memakai pola "adjust state during render"
+ * (bandingkan nilai sekarang dengan yang terakhir terlihat) alih-alih
+ * useEffect: setState sinkron di dalam effect memicu render berantai, dan
+ * eslint-plugin-react-hooks menandainya sebagai error. Nilai baru dari
+ * server hanya diadopsi saat field tidak sedang difokuskan, supaya ketikan
+ * yang belum di-commit tidak hilang di tengah jalan.
+ */
+function ResolveField({
+  label,
+  value,
+  editable,
+  placeholder,
+  onCommit,
+}: {
+  label: string;
+  value: string | null;
+  editable: boolean;
+  placeholder: string;
+  onCommit: (value: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(value ?? "");
+  const [focused, setFocused] = useState(false);
+  const [seenValue, setSeenValue] = useState(value);
+
+  if (value !== seenValue && !focused) {
+    setSeenValue(value);
+    setDraft(value ?? "");
+  }
+
+  if (!editable) {
+    return (
+      <div>
+        <p className="text-xs font-medium text-zinc-500">{label}</p>
+        <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-zinc-600">
+          {value?.trim() ? value : <span className="text-zinc-300">Belum diisi</span>}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <label className="text-xs font-medium text-zinc-500" htmlFor={`resolve-${label}`}>
+        {label}
+      </label>
+      <textarea
+        id={`resolve-${label}`}
+        rows={3}
+        maxLength={2000}
+        value={draft}
+        placeholder={placeholder}
+        onFocus={() => setFocused(true)}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => {
+          setFocused(false);
+          void onCommit(draft);
+        }}
+        className="mt-1 w-full resize-y rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-700 outline-none focus:border-zinc-400"
+      />
     </div>
   );
 }
