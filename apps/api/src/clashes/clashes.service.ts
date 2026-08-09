@@ -5,7 +5,8 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, Role } from '@prisma/client';
+import { ConfigService } from '@nestjs/config';
+import { AttachmentRole, Prisma, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -21,13 +22,46 @@ import {
   UpdateClashDto,
 } from './dto/clash.dto';
 
-type PatchableField = 'statusId' | 'priorityId' | 'assigneeId' | 'dueDate';
+type PatchableField =
+  | 'statusId'
+  | 'priorityId'
+  | 'assigneeId'
+  | 'dueDate'
+  | 'resolveProposed'
+  | 'resolveByConsultant';
 type PatchValue = string | null | undefined;
 type Patch = Partial<Record<PatchableField, PatchValue>>;
 
 /** Hard ceiling on ClashesService.export() regardless of how many rows a
  * filter set actually matches — see that method's comment. */
 const EXPORT_MAX_ROWS = 5000;
+
+/**
+ * Far lower than EXPORT_MAX_ROWS because the two are not comparable: an
+ * export row is a handful of strings, whereas a report row makes the browser
+ * download, decode, flatten markup onto, and re-encode up to TWO images. At
+ * 300 rows that is already up to 600 image round trips and one to three
+ * minutes of work — see src/lib/report/ on the frontend.
+ */
+const REPORT_MAX_ROWS = 300;
+
+/**
+ * 15 minutes instead of StorageService.signKey()'s 5-minute default: a
+ * 300-row report can spend longer than 5 minutes fetching images, and a URL
+ * that expires mid-run turns into a hole in the finished spreadsheet. The
+ * trade-off is real and deliberate — a signed URL cannot be revoked once
+ * issued, so this widens the window in which a leaked link still works. The
+ * client also falls back to the authenticated download route on 403, so this
+ * is belt-and-braces rather than the only defence.
+ */
+const REPORT_SIGNED_URL_TTL_MS = 15 * 60 * 1000;
+
+/** Roles that can appear in the report's two image columns. */
+const REPORT_IMAGE_ROLES = [AttachmentRole.ORIGINAL, AttachmentRole.CLASH_DETECTION] as const;
+
+/** AuditLog.oldValue/newValue are unbounded TEXT, but the Riwayat timeline
+ * renders them inline — a 2000-character resolve note would wreck it. */
+const AUDIT_LABEL_MAX = 120;
 
 interface Slice {
   id: string;
@@ -86,7 +120,21 @@ export class ClashesService {
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
     private readonly notifications: NotificationsService,
+    private readonly config: ConfigService,
   ) {}
+
+  /**
+   * Kill switch — see CLASH_REPORT_ENABLED in config/env.validation.ts.
+   *
+   * Compares against `false` rather than checking truthiness: Joi declares
+   * this key as a boolean with `.default(true)`, so ConfigService hands back
+   * a real boolean (verified, not assumed — a malformed value fails boot
+   * instead of reaching here). Only an explicit false disables the feature;
+   * an unset key keeps it on.
+   */
+  isReportEnabled(): boolean {
+    return this.config.get<boolean>('CLASH_REPORT_ENABLED') !== false;
+  }
 
   /**
    * Loads a clash and verifies it belongs to `projectId` — the guard for
@@ -166,6 +214,128 @@ export class ClashesService {
     ]);
 
     return { data, total };
+  }
+
+  /**
+   * Backs the Register's "Export Laporan Clash" button — the consultant-format
+   * xlsx with two image columns per row, built client-side (see
+   * src/lib/report/). Same filters/sort as list()/export(), but returns joined
+   * names plus, per clash, the ORIGINAL and CLASH_DETECTION attachments with
+   * signed URLs and their markup so the browser can flatten and embed them.
+   *
+   * A separate route from export() rather than a flag on it: export() feeds
+   * two shipped, working buttons, and reshaping its response would put those
+   * at risk for a feature that may yet be turned off (CLASH_REPORT_ENABLED).
+   *
+   * Exactly FOUR queries regardless of row count — the attachment and
+   * annotation lookups are batched with `in`, never per-clash. There is a
+   * regression test pinning that; an N+1 here would mean 300 clashes issuing
+   * 600+ round trips before the browser has downloaded a single image.
+   *
+   * When one clash has several attachments of the same role the NEWEST
+   * (createdAt desc) wins — re-tagging a better screenshot should supersede
+   * the old one without forcing a delete. Surfaced in the UI copy too.
+   */
+  async report(query: ListClashesQueryDto, projectId: string, user: AuthUser) {
+    if (!this.isReportEnabled()) {
+      // 404, not 403: a disabled feature should look absent rather than
+      // advertise that it exists and is being withheld.
+      throw new NotFoundException('Fitur laporan clash tidak tersedia.');
+    }
+    if (query.deleted && user.role !== Role.ADMIN) {
+      throw new ForbiddenException('Hanya Admin yang dapat melihat clash yang terhapus.');
+    }
+
+    const where = this.buildListWhere(projectId, query);
+    const orderBy = this.buildListOrderBy(query.sort, query.dir);
+
+    const [clashes, total] = await Promise.all([
+      this.prisma.clash.findMany({
+        where,
+        orderBy,
+        take: REPORT_MAX_ROWS,
+        include: {
+          discipline: { select: { id: true, code: true, name: true } },
+          zone: { select: { id: true, name: true, level: true } },
+          status: { select: { id: true, name: true } },
+        },
+      }),
+      this.prisma.clash.count({ where }),
+    ]);
+
+    const clashIds = clashes.map((c) => c.id);
+
+    const attachments = clashIds.length
+      ? await this.prisma.attachment.findMany({
+          where: { clashId: { in: clashIds }, role: { in: [...REPORT_IMAGE_ROLES] } },
+          orderBy: { createdAt: 'desc' },
+        })
+      : [];
+
+    // First write wins because the query is already sorted newest-first.
+    const picked = new Map<string, { original?: typeof attachments[number]; clash?: typeof attachments[number] }>();
+    for (const a of attachments) {
+      const slot = picked.get(a.clashId) ?? {};
+      if (a.role === AttachmentRole.ORIGINAL) slot.original ??= a;
+      else slot.clash ??= a;
+      picked.set(a.clashId, slot);
+    }
+
+    const pickedIds = [...picked.values()].flatMap((s) =>
+      [s.original?.id, s.clash?.id].filter((id): id is string => Boolean(id)),
+    );
+    const annotations = pickedIds.length
+      ? await this.prisma.annotation.findMany({
+          where: { attachmentId: { in: pickedIds } },
+          orderBy: { createdAt: 'asc' },
+        })
+      : [];
+
+    const annotationsByAttachment = new Map<string, typeof annotations>();
+    for (const an of annotations) {
+      const list = annotationsByAttachment.get(an.attachmentId) ?? [];
+      list.push(an);
+      annotationsByAttachment.set(an.attachmentId, list);
+    }
+
+    const toImageRef = (a: (typeof attachments)[number] | undefined) => {
+      if (!a) return null;
+      const { token, expiresAt } = this.storage.signKey(
+        this.signedUrlSubject(a.id),
+        REPORT_SIGNED_URL_TTL_MS,
+      );
+      return {
+        attachmentId: a.id,
+        fileName: a.fileName,
+        fileType: a.fileType,
+        url: `/clashes/attachments/${a.id}/signed?token=${token}&expiresAt=${expiresAt}`,
+        expiresAt,
+        annotations: annotationsByAttachment.get(a.id) ?? [],
+      };
+    };
+
+    const data = clashes.map((c) => {
+      const slot = picked.get(c.id);
+      return {
+        id: c.id,
+        uniqueCode: c.uniqueCode,
+        title: c.title,
+        description: c.description,
+        createdAt: c.createdAt,
+        closedAt: c.closedAt,
+        resolveProposed: c.resolveProposed,
+        resolveByConsultant: c.resolveByConsultant,
+        discipline: c.discipline,
+        zone: c.zone,
+        status: c.status,
+        original: toImageRef(slot?.original),
+        clashDetection: toImageRef(slot?.clash),
+      };
+    });
+
+    // `maxRows` lets the client word its own truncation warning instead of
+    // hard-coding a number that would drift from this constant.
+    return { data, total, maxRows: REPORT_MAX_ROWS };
   }
 
   private buildListWhere(projectId: string, query: ListClashesQueryDto): Prisma.ClashWhereInput {
@@ -446,7 +616,7 @@ export class ClashesService {
    */
   async deleteAttachment(clashId: string, attachmentId: string, user: AuthUser, projectId: string) {
     const attachment = await this.assertAttachmentInClash(clashId, attachmentId, projectId);
-    this.assertCanDeleteAttachment(user, attachment.uploadedById);
+    this.assertCanManageAttachment(user, attachment.uploadedById);
 
     await this.prisma.$transaction(async (tx) => {
       await tx.annotation.deleteMany({ where: { attachmentId: attachment.id } });
@@ -469,10 +639,49 @@ export class ClashesService {
     return { id: attachment.id };
   }
 
-  private assertCanDeleteAttachment(user: AuthUser, uploadedById: string) {
+  /**
+   * Tagging an attachment's report role decides which photo a consultant
+   * sees in the finished document, so it is gated exactly like deleting one:
+   * ENGINEER may only touch their own upload, COORDINATOR/ADMIN anyone's.
+   * One rule shared by both call sites rather than two that can drift.
+   */
+  private assertCanManageAttachment(user: AuthUser, uploadedById: string) {
     if (user.role === Role.COORDINATOR || user.role === Role.ADMIN) return;
     if (user.role === Role.ENGINEER && uploadedById === user.id) return;
-    throw new ForbiddenException('Anda hanya dapat menghapus lampiran yang Anda unggah.');
+    throw new ForbiddenException('Anda hanya dapat mengelola lampiran yang Anda unggah.');
+  }
+
+  /**
+   * Sets which column of the "Tabel Clash Detection" report this attachment
+   * feeds. Audited because it changes what ends up in a document sent
+   * outside the company — "who put this photo in the report" needs an answer.
+   */
+  async updateAttachmentRole(
+    clashId: string,
+    attachmentId: string,
+    role: AttachmentRole,
+    user: AuthUser,
+    projectId: string,
+  ) {
+    const attachment = await this.assertAttachmentInClash(clashId, attachmentId, projectId);
+    this.assertCanManageAttachment(user, attachment.uploadedById);
+
+    if (attachment.role === role) return attachment;
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.attachment.update({ where: { id: attachment.id }, data: { role } });
+      await tx.auditLog.create({
+        data: {
+          clashId,
+          actorId: user.id,
+          action: 'attachment_role_changed',
+          field: attachment.fileName,
+          oldValue: attachment.role,
+          newValue: role,
+        },
+      });
+      return updated;
+    });
   }
 
   /**
@@ -812,6 +1021,8 @@ export class ClashesService {
         priorityId: dto.priorityId,
         assigneeId: dto.assigneeId,
         dueDate: dto.dueDate,
+        resolveProposed: dto.resolveProposed,
+        resolveByConsultant: dto.resolveByConsultant,
       };
     }
 
@@ -821,10 +1032,23 @@ export class ClashesService {
         'Engineer hanya dapat mengubah status, bukan prioritas, assignee, atau due date.',
       );
     }
-    if (dto.statusId === undefined) return {};
+    // resolveByConsultant records what the consultant answered — an Engineer
+    // relaying that second-hand is how a report ends up misquoting an
+    // external party. resolveProposed is TATA's own proposal, which is
+    // exactly what the Engineer working the clash is there to write.
+    if (dto.resolveByConsultant !== undefined) {
+      throw new ForbiddenException(
+        'Hanya Coordinator atau Admin yang dapat mengisi jawaban konsultan.',
+      );
+    }
 
-    await this.assertEngineerStatusTransition(clash.statusId, dto.statusId);
-    return { statusId: dto.statusId };
+    const patch: Patch = {};
+    if (dto.resolveProposed !== undefined) patch.resolveProposed = dto.resolveProposed;
+    if (dto.statusId !== undefined) {
+      await this.assertEngineerStatusTransition(clash.statusId, dto.statusId);
+      patch.statusId = dto.statusId;
+    }
+    return patch;
   }
 
   private async assertStatusExists(statusId: string) {
@@ -873,6 +1097,8 @@ export class ClashesService {
       reporterId: string;
       dueDate: Date | null;
       closedAt: Date | null;
+      resolveProposed?: string | null;
+      resolveByConsultant?: string | null;
     },
     patch: Patch,
     actorId: string,
@@ -889,6 +1115,8 @@ export class ClashesService {
       priorityId: clash.priorityId,
       assigneeId: clash.assigneeId,
       dueDate: clash.dueDate ? clash.dueDate.toISOString() : null,
+      resolveProposed: clash.resolveProposed ?? null,
+      resolveByConsultant: clash.resolveByConsultant ?? null,
     };
 
     const nowIso = new Date();
@@ -923,6 +1151,14 @@ export class ClashesService {
           break;
         case 'dueDate':
           data.dueDate = rawValue ? new Date(rawValue) : null;
+          break;
+        // Empty string is normalised to null so "cleared the field" has one
+        // representation in the DB rather than two that render identically.
+        case 'resolveProposed':
+          data.resolveProposed = rawValue ? rawValue : null;
+          break;
+        case 'resolveByConsultant':
+          data.resolveByConsultant = rawValue ? rawValue : null;
           break;
       }
 
@@ -991,11 +1227,17 @@ export class ClashesService {
       const newTime = newValue ? new Date(newValue).getTime() : null;
       return oldTime === newTime;
     }
+    // "" and null both mean "not filled in" for the free-text resolve fields
+    // (applyPatch stores null for both), so clearing an already-empty field
+    // must not produce a spurious audit row.
+    if (field === 'resolveProposed' || field === 'resolveByConsultant') {
+      return (oldValue ?? '') === (newValue ?? '');
+    }
     return oldValue === newValue;
   }
 
   private async labelFor(field: PatchableField, value: PatchValue): Promise<string> {
-    if (value === null || value === undefined) return '-';
+    if (value === null || value === undefined || value === '') return '-';
     switch (field) {
       case 'statusId':
         return (await this.prisma.status.findUnique({ where: { id: value } }))?.name ?? value;
@@ -1005,6 +1247,11 @@ export class ClashesService {
         return (await this.prisma.user.findUnique({ where: { id: value } }))?.name ?? value;
       case 'dueDate':
         return value;
+      // Free text up to 2000 chars, but AuditLog rows render inline in the
+      // Riwayat timeline — truncate rather than let one note swamp it.
+      case 'resolveProposed':
+      case 'resolveByConsultant':
+        return value.length > AUDIT_LABEL_MAX ? `${value.slice(0, AUDIT_LABEL_MAX)}…` : value;
     }
   }
 }

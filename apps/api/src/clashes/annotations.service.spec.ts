@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AnnotationKind, Role } from '@prisma/client';
 import { AnnotationsService } from './annotations.service';
 import { ClashesService } from './clashes.service';
@@ -9,6 +10,9 @@ import { AuthUser } from '../auth/auth.types';
 
 const fakeStorage = {} as unknown as StorageService;
 const fakeNotifications = {} as unknown as NotificationsService;
+// ClashesService is only constructed here so AnnotationsService can reuse its
+// scoping check — nothing in these tests touches the report feature.
+const fakeConfig = {} as unknown as ConfigService;
 
 const PROJECT_ID = 'proj-1';
 const CLASH_ID = 'clash-1';
@@ -68,7 +72,7 @@ function makeHarness(opts: {
     annotation: annotationDelegate,
   } as unknown as PrismaService;
 
-  const clashesService = new ClashesService(prisma, fakeStorage, fakeNotifications);
+  const clashesService = new ClashesService(prisma, fakeStorage, fakeNotifications, fakeConfig);
   const service = new AnnotationsService(prisma, clashesService);
 
   return { service, clashDelegate, attachmentDelegate, annotationDelegate };
