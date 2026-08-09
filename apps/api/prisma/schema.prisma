@@ -39,6 +39,21 @@ enum AnnotationKind {
   TEXT
 }
 
+/**
+ * Peran sebuah lampiran di dalam laporan "Tabel Clash Detection" — laporan
+ * konsultan punya dua kolom gambar per baris (kondisi asli vs hasil clash
+ * detection), dan tanpa penanda ini tidak ada cara memilih gambar mana yang
+ * masuk kolom mana. OTHER adalah default supaya lampiran lama (dan setiap
+ * upload yang penggunanya belum menandai) tidak diam-diam muncul di laporan:
+ * lebih baik sel kosong daripada foto yang salah di dokumen yang dikirim ke
+ * konsultan. Lihat ClashesService.report().
+ */
+enum AttachmentRole {
+  ORIGINAL
+  CLASH_DETECTION
+  OTHER
+}
+
 model User {
   id           String   @id @default(uuid())
   name         String
@@ -123,6 +138,16 @@ model Project {
   zones       Zone[]
   clashes     Clash[]
   importJobs  ImportJob[]
+
+  // Index ini SUDAH ada di database sejak migrasi
+  // 20260808120000_project_archive_and_clash_seq, tapi tidak ikut
+  // dideklarasikan di sini. Akibatnya setiap `prisma migrate dev`
+  // berikutnya mem-diff-nya sebagai index liar dan menyisipkan
+  // `DROP INDEX "Project_archivedAt_idx"` ke migrasi yang sedang dibuat —
+  // menghapus index yang justru dipakai project switcher dan GET /projects
+  // (keduanya memfilter archivedAt IS NULL). Dideklarasikan di sini supaya
+  // schema dan database kembali sinkron dan DROP itu berhenti muncul.
+  @@index([archivedAt])
 }
 
 model ProjectMember {
@@ -213,6 +238,13 @@ model Clash {
   // without colliding, while an imported row with a given external id can
   // never be created twice in the same project (see ImportProcessor).
   externalId   String?
+  // Dua kolom teks bebas laporan "Tabel Clash Detection": usulan penyelesaian
+  // dari pihak TATA dan jawaban konsultan. Nullable, bukan default "", supaya
+  // "belum diisi" bisa dibedakan dari "sengaja dikosongkan" — sejalan dengan
+  // dueDate/closedAt/externalId di atas. Kolom "Resolve Date" di laporan tidak
+  // ditambahkan di sini: itu closedAt yang sudah ada.
+  resolveProposed     String?
+  resolveByConsultant String?
   // Soft delete (Admin only). Null = visible everywhere. A nullable
   // timestamp rather than an `isActive` boolean like Discipline/Zone/Priority:
   // those mean "retired from new selection, still visible in history" (a
@@ -260,6 +292,11 @@ model Attachment {
   sizeBytes    Int
   uploadedById String
   createdAt    DateTime @default(now())
+  // DEFAULT-nya bukan sekadar kenyamanan: itu yang membuat kolom ini aditif
+  // murni, sehingga Prisma Client versi lama (yang tidak menyebut kolom ini
+  // di INSERT-nya) tetap bisa menulis baris Attachment. Artinya kode bisa
+  // di-rollback tanpa harus ikut menurunkan skema.
+  role         AttachmentRole @default(OTHER)
 
   clash      Clash @relation(fields: [clashId], references: [id])
   uploadedBy User  @relation(fields: [uploadedById], references: [id])
