@@ -8,14 +8,10 @@ import { useSignedUrl } from "@/lib/use-signed-url";
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api/client";
 import { annotationPayload, toAnnotation } from "@/lib/api/mappers";
 import type { ApiAnnotation } from "@/lib/api/types";
-import {
-  arrowHeadPoints,
-  strokeWidthPixels,
-  toPixels,
-  type Annotation,
-  type Geometry,
-  type PageBox,
-} from "@/lib/annotations";
+import type { Annotation, Geometry, PageBox } from "@/lib/annotations";
+// Dipakai bersama dengan export laporan clash — lihat src/lib/markup-flatten.ts
+// untuk alasan ini tidak boleh disalin.
+import { drawAnnotationsOnCanvas, loadImage } from "@/lib/markup-flatten";
 import { AnnotationLayer, type AnnotationTool } from "./AnnotationLayer";
 import { AnnotationToolbar } from "./AnnotationToolbar";
 
@@ -494,48 +490,4 @@ export function AttachmentPreviewModal({
       </div>
     </div>
   );
-}
-
-function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = src;
-  });
-}
-
-function drawAnnotationsOnCanvas(ctx: CanvasRenderingContext2D, annotations: Annotation[], box: PageBox) {
-  for (const annotation of annotations) {
-    const shape = toPixels(annotation, box);
-    const strokeWidthPx = strokeWidthPixels(annotation.strokeWidth, box);
-    ctx.strokeStyle = annotation.color;
-    ctx.fillStyle = annotation.color;
-    ctx.lineWidth = strokeWidthPx;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-
-    if (shape.kind === "RECT") {
-      ctx.strokeRect(shape.x, shape.y, shape.w, shape.h);
-    } else if (shape.kind === "ARROW") {
-      ctx.beginPath();
-      ctx.moveTo(shape.x1, shape.y1);
-      ctx.lineTo(shape.x2, shape.y2);
-      ctx.stroke();
-      const [p1, p2] = arrowHeadPoints(shape.x1, shape.y1, shape.x2, shape.y2, strokeWidthPx);
-      ctx.beginPath();
-      ctx.moveTo(shape.x2, shape.y2);
-      ctx.lineTo(p1[0], p1[1]);
-      ctx.lineTo(p2[0], p2[1]);
-      ctx.closePath();
-      ctx.fill();
-    } else if (shape.kind === "FREEHAND") {
-      ctx.beginPath();
-      shape.points.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
-      ctx.stroke();
-    } else if (shape.kind === "TEXT") {
-      ctx.font = `${shape.size}px sans-serif`;
-      ctx.fillText(annotation.text ?? "", shape.x, shape.y + shape.size);
-    }
-  }
 }
