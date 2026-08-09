@@ -20,6 +20,14 @@ export interface ApiProject {
   id: string;
   name: string;
   code: string;
+  archivedAt: string | null;
+}
+
+export interface ApiProjectStats {
+  id: string;
+  totalClashCount: number;
+  deletedClashCount: number;
+  archivedAt: string | null;
 }
 
 export interface ApiProjectMember {

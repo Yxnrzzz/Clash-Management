@@ -3,11 +3,14 @@ import { Prisma } from '@prisma/client';
 import { MulterError } from 'multer';
 import { AllExceptionsFilter } from './all-exceptions.filter';
 
-function hostWith() {
+function hostWith(requestId = 'test-request-id') {
   const json = jest.fn();
   const status = jest.fn(() => ({ json }));
   const host = {
-    switchToHttp: () => ({ getResponse: () => ({ status }) }),
+    switchToHttp: () => ({
+      getResponse: () => ({ status }),
+      getRequest: () => ({ id: requestId }),
+    }),
   } as unknown as ArgumentsHost;
   return { host, status, json };
 }
@@ -84,6 +87,21 @@ describe('AllExceptionsFilter', () => {
     expect(json).toHaveBeenCalledWith(
       expect.objectContaining({ statusCode: 500, message: 'Terjadi kesalahan pada server.' }),
     );
+  });
+
+  // The request id (set by app.module.ts's genReqId, echoed on the
+  // X-Request-Id response header) is the only way to tie a user-reported
+  // "I got an error" back to the matching server-side log line — but only
+  // worth attaching for our own faults (5xx), not routine 4xx client errors.
+  it('attaches the request id to a 500 body but not to a 404', () => {
+    const filter = new AllExceptionsFilter();
+    const { host: host500, json: json500 } = hostWith('req-abc-123');
+    filter.catch(new Error('kaboom'), host500);
+    expect(json500).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-abc-123' }));
+
+    const { host: host404, json: json404 } = hostWith('req-should-not-appear');
+    filter.catch(new NotFoundException('Clash tidak ditemukan.'), host404);
+    expect(json404).toHaveBeenCalledWith(expect.not.objectContaining({ requestId: expect.anything() }));
   });
 
   it('does not choke on a thrown non-Error value', () => {

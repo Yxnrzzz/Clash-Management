@@ -44,6 +44,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     deploy:
       resources:
         limits:
@@ -65,6 +70,11 @@ services:
       retries: 10
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env — see .env.prod.example}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     deploy:
       resources:
         limits:
@@ -88,13 +98,17 @@ services:
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
       PORT: 3001
-      # 1 hop for Caddy in front. If Next.js's rewrite proxy (web → api)
-      # turns out to append itself as a second X-Forwarded-For hop — verify
-      # this empirically once the stack is up, don't just trust this number
-      # (see HANDOFF.md / the plan's verification steps: send >5 rapid
-      # POST /api/auth/login from one real client IP and confirm the 6th
-      # gets 429 — if it doesn't, or if it 429s a different client sharing
-      # the same NAT, the hop count is wrong).
+      # 1 hop for Caddy in front. Verified empirically (not just assumed)
+      # against this exact chain — built the api/web prod images, ran them
+      # behind a plain Caddy reverse_proxy on a Docker network shaped like
+      # this compose file, then: (1) sent 6 rapid POST /api/auth/login from
+      # one real client — the 6th got 429, so a real client isn't falsely
+      # let through; (2) repeated it with a different spoofed
+      # X-Forwarded-For value on every request — still 429 every time, so a
+      # client can't reset/bypass the limiter by forging that header. Both
+      # together confirm Next's rewrite proxy (web → api) does NOT need to
+      # be counted as its own X-Forwarded-For hop here. Re-verify if the
+      # proxy chain in front of Caddy ever changes (e.g. adding a CDN).
       TRUSTED_PROXY_HOPS: 1
     # No published port — only reachable from other containers on this
     # compose network (web's rewrite target, and anyone running `docker
@@ -104,12 +118,20 @@ services:
       - clashhub-uploads:/app/uploads
     healthcheck:
       # api's own base image (node:22-alpine) has no curl; BusyBox's wget
-      # (bundled with Alpine) is enough for a liveness probe.
-      test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/health"]
+      # (bundled with Alpine) is enough for a liveness probe. /ready (not
+      # /health) so a Redis outage — which silently stops BullMQ from
+      # processing notifications/imports — actually marks the container
+      # unhealthy instead of staying "healthy" while jobs quietly pile up.
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/health/ready"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     deploy:
       resources:
         limits:
@@ -135,6 +157,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     deploy:
       resources:
         limits:
@@ -157,13 +184,22 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - clashhub-caddy-data:/data
       - clashhub-caddy-config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   # Daily pg_dump inside the postgres container, pruned after RETENTION_DAYS
-  # — see scripts/backup-db.sh (the same script, run on a loop here, or
-  # invoke it manually / via host cron; either works against this same
-  # container name). Requires no password itself: pg_dump runs as a local
-  # `docker exec` inside the postgres container, authenticated via its own
-  # trusted local socket, not over the network.
+  # — see scripts/backup-db.sh (the same command, run on a loop here, or
+  # invoke that script manually / via host cron; either works against this
+  # same container name). Requires no password itself: pg_dump runs as a
+  # local `docker exec` inside the postgres container, authenticated via its
+  # own trusted local socket, not over the network.
+  #
+  # Also archives the uploads volume (attachments) alongside the DB dump —
+  # a pg_dump alone leaves you with Clash rows pointing at attachment files
+  # that a DB-only restore can never bring back.
   backup:
     image: postgres:16
     container_name: clashhub-backup
@@ -179,10 +215,19 @@ services:
       RETENTION_DAYS: 7
     volumes:
       - ./backups:/backups
+      - clashhub-uploads:/uploads:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     entrypoint: >
       sh -c "while true; do
-        FILE=/backups/clashhub_$$(date +%Y%m%d_%H%M%S).dump;
-        pg_dump -F c -f \"$$FILE\" && find /backups -name '*.dump' -mtime +$$RETENTION_DAYS -delete;
+        STAMP=$$(date +%Y%m%d_%H%M%S);
+        pg_dump -F c -f \"/backups/clashhub_$${STAMP}.dump\" &&
+        tar -C /uploads -czf \"/backups/uploads_$${STAMP}.tar.gz\" . &&
+        find /backups -name 'clashhub_*.dump' -mtime +$$RETENTION_DAYS -delete &&
+        find /backups -name 'uploads_*.tar.gz' -mtime +$$RETENTION_DAYS -delete;
         sleep 86400;
       done"
 

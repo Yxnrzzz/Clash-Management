@@ -169,9 +169,13 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
   }
 
   function fieldLabel(field: string) {
-    return { assigneeId: "Assignee", priorityId: "Prioritas", dueDate: "Due Date", statusId: "Status" }[
-      field
-    ] ?? field;
+    return {
+      assigneeId: "Assignee",
+      priorityId: "Prioritas",
+      dueDate: "Due Date",
+      statusId: "Status",
+      uniqueCode: "Kode Unik",
+    }[field] ?? field;
   }
 
   function auditText(entry: (typeof auditLogs)[number]) {
@@ -182,6 +186,12 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     if (entry.aksi === "restored") return `${actor} memulihkan clash ini.`;
     if (entry.aksi === "attachment_added") return `${actor} menambahkan lampiran "${entry.nilaiBaru}".`;
     if (entry.aksi === "attachment_deleted") return `${actor} menghapus lampiran "${entry.nilaiLama}".`;
+    if (entry.aksi === "code_changed") {
+      return `Kode clash berubah dari "${entry.nilaiLama}" ke "${entry.nilaiBaru}" karena kode proyek atau disiplin diganti.`;
+    }
+    if (entry.aksi === "code_reassigned") {
+      return `${actor} memulihkan clash ini, tapi kode lamanya "${entry.nilaiLama}" sudah dipakai clash lain — kode baru "${entry.nilaiBaru}" diberikan.`;
+    }
     if (!entry.field) return `${actor} melakukan aksi "${entry.aksi}".`;
     return `${actor} mengubah ${fieldLabel(entry.field ?? "").toLowerCase()} dari "${entry.nilaiLama}" ke "${entry.nilaiBaru}".`;
   }

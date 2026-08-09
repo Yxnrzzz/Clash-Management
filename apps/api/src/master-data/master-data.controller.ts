@@ -1,8 +1,10 @@
 import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { ActiveProject } from '../common/decorators/active-project.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { SkipProjectScope } from '../common/decorators/skip-project-scope.decorator';
+import { AuthUser } from '../auth/auth.types';
 import {
   CopyTemplateDto,
   CreateDisciplineDto,
@@ -38,8 +40,9 @@ export class MasterDataController {
     @Param('id') id: string,
     @Body() dto: UpdateDisciplineDto,
     @ActiveProject() projectId: string,
+    @CurrentUser() user: AuthUser,
   ) {
-    return this.masterData.updateDiscipline(id, dto, projectId);
+    return this.masterData.updateDiscipline(id, dto, projectId, user);
   }
 
   @Roles(Role.ADMIN)

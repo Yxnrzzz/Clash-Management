@@ -11,6 +11,7 @@ import { StorageService } from '../storage/storage.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthUser } from '../auth/auth.types';
 import { NOT_DELETED } from './clash-scope';
+import { allocateLowestFreeSeq, allocateNextSeq, formatClashCode, lockDiscipline } from './clash-code';
 import {
   BulkUpdateClashDto,
   CreateClashDto,
@@ -559,11 +560,22 @@ export class ClashesService {
    * and validating discipline/zone/priority/status first — this method only
    * owns generating the unique code and writing the Clash + AuditLog pair.
    *
-   * The unique code embeds a per-discipline sequence number. Two concurrent
-   * creates for the same discipline can race for the same number, so retry
-   * once on a uniqueCode collision with a freshly counted value. A collision
-   * on (projectId, externalId) is a different situation — it means this
-   * exact import row already exists — so it's surfaced as
+   * The code embeds a per-discipline sequence number (`seq`) allocated by
+   * allocateLowestFreeSeq, which fills gaps left by soft-deleted clashes —
+   * see the Clash.deletedAt doc comment in schema.prisma. Concurrent creates
+   * for the same discipline are serialized by an xact-scoped advisory lock
+   * (lockDiscipline) rather than left to retry alone: without the lock, N
+   * concurrent creates would all read the same gap, N-1 would fail on the
+   * partial unique index, and retrying would just re-read the same next gap
+   * again (O(N^2) wasted inserts, unbounded tail latency). The lock makes
+   * this O(N) with zero wasted inserts. The bounded retry loop below still
+   * exists for the residual case where a concurrent rename transaction
+   * (ProjectsService.update / MasterDataService.updateDiscipline) is
+   * rewriting codes into this discipline's namespace at the same time — the
+   * partial unique index remains the real arbiter.
+   *
+   * A collision on (projectId, externalId) is a different situation — it
+   * means this exact import row already exists — so it's surfaced as
    * DuplicateExternalIdError instead of retried.
    */
   async createClashRecord(input: {
@@ -582,39 +594,39 @@ export class ClashesService {
     const nowIso = new Date();
     const auditAction = input.auditAction ?? 'created';
 
-    for (let attempt = 0; attempt < 2; attempt++) {
-      // Deliberately NOT filtered by NOT_DELETED: a soft-deleted clash keeps
-      // its uniqueCode forever (see the Clash.deletedAt doc comment), so
-      // excluding deleted rows here would regenerate an already-taken code,
-      // the P2002 retry below would recompute the same count, and creation
-      // would hard-fail after two attempts.
-      const count = await this.prisma.clash.count({ where: { disciplineId: input.discipline.id } });
-      const uniqueCode = `${input.project.code}-${input.discipline.code}-${String(count + 1).padStart(4, '0')}`;
-
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        return await this.prisma.$transaction(async (tx) => {
-          const clash = await tx.clash.create({
-            data: {
-              uniqueCode,
-              projectId: input.project.id,
-              title: input.title.trim(),
-              description: input.description.trim(),
-              disciplineId: input.discipline.id,
-              zoneId: input.zoneId,
-              statusId: input.statusId,
-              priorityId: input.priorityId,
-              reporterId: input.reporterId,
-              dueDate: input.dueDate,
-              externalId: input.externalId ?? null,
-            },
-          });
+        return await this.prisma.$transaction(
+          async (tx) => {
+            await lockDiscipline(tx, input.discipline.id);
+            const seq = await allocateLowestFreeSeq(tx, input.discipline.id);
+            const uniqueCode = formatClashCode(input.project.code, input.discipline.code, seq);
 
-          await tx.auditLog.create({
-            data: { clashId: clash.id, actorId: input.reporterId, action: auditAction, createdAt: nowIso },
-          });
+            const clash = await tx.clash.create({
+              data: {
+                uniqueCode,
+                seq,
+                projectId: input.project.id,
+                title: input.title.trim(),
+                description: input.description.trim(),
+                disciplineId: input.discipline.id,
+                zoneId: input.zoneId,
+                statusId: input.statusId,
+                priorityId: input.priorityId,
+                reporterId: input.reporterId,
+                dueDate: input.dueDate,
+                externalId: input.externalId ?? null,
+              },
+            });
 
-          return clash;
-        });
+            await tx.auditLog.create({
+              data: { clashId: clash.id, actorId: input.reporterId, action: auditAction, createdAt: nowIso },
+            });
+
+            return clash;
+          },
+          { maxWait: 10_000, timeout: 20_000 },
+        );
       } catch (error) {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
           const target = Array.isArray(error.meta?.target) ? (error.meta.target as string[]) : [];
@@ -623,7 +635,7 @@ export class ClashesService {
               `External id "${input.externalId}" sudah dipakai di proyek ini.`,
             );
           }
-          if (attempt === 0) continue; // uniqueCode race — retry with a recomputed count
+          if (attempt < 2) continue; // code/seq race — retry with a freshly allocated value
         }
         throw error;
       }
@@ -688,9 +700,14 @@ export class ClashesService {
    * Admin-only soft delete: sets deletedAt so the clash drops out of every
    * read path (list/metrics/bulkUpdate/detail/comments/attachments), while
    * the row itself, its comments, audit log, and attachment files are left
-   * untouched — restore() reverses this exactly. uniqueCode is never freed,
-   * so a re-import of the same externalId stays "skipped" until restored
-   * (see the comment in ImportProcessor.importRow).
+   * untouched. uniqueCode/seq ARE freed by this — a new clash in the same
+   * discipline can now be allocated this clash's old seq (see clash-code.ts)
+   * — so restore() below is no longer guaranteed to be lossless; it recovers
+   * the old code only if nothing has claimed it since. externalId is left
+   * untouched by this method, which is what actually keeps a re-import of
+   * the same externalId "skipped" (see the comment in ImportProcessor.importRow
+   * — do NOT make the (projectId, externalId) constraint partial too, or a
+   * re-import would resurrect deleted rows as duplicates).
    */
   async softDelete(id: string, user: AuthUser, projectId: string) {
     await this.assertClashInProject(id, projectId);
@@ -702,6 +719,15 @@ export class ClashesService {
     });
   }
 
+  /**
+   * Reverses softDelete. Fast path: if nothing has since claimed this
+   * clash's old uniqueCode/seq, restore it unchanged. Otherwise — some other
+   * clash in the discipline was allocated that seq while this one was
+   * deleted — allocate a fresh seq at the END of the sequence (not a gap,
+   * to avoid churning some other live clash's would-be next code) and
+   * record the reassignment as its own AuditLog entry so the detail page's
+   * timeline explains the code change (see clashes/[id]/page.tsx auditText).
+   */
   async restore(id: string, user: AuthUser, projectId: string) {
     const clash = await this.assertClashInProject(id, projectId, { includeDeleted: true });
     if (!clash.deletedAt) {
@@ -709,8 +735,46 @@ export class ClashesService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.clash.update({ where: { id }, data: { deletedAt: null } });
+      await lockDiscipline(tx, clash.disciplineId);
+
+      const conflict = await tx.clash.findFirst({
+        where: {
+          disciplineId: clash.disciplineId,
+          deletedAt: null,
+          OR: [{ uniqueCode: clash.uniqueCode }, { seq: clash.seq }],
+        },
+        select: { id: true },
+      });
+
+      if (!conflict) {
+        const updated = await tx.clash.update({ where: { id }, data: { deletedAt: null } });
+        await tx.auditLog.create({ data: { clashId: id, actorId: user.id, action: 'restored' } });
+        return updated;
+      }
+
+      const [project, discipline] = await Promise.all([
+        tx.project.findUniqueOrThrow({ where: { id: clash.projectId } }),
+        tx.discipline.findUniqueOrThrow({ where: { id: clash.disciplineId } }),
+      ]);
+      const newSeq = await allocateNextSeq(tx, clash.disciplineId);
+      const newCode = formatClashCode(project.code, discipline.code, newSeq);
+      const oldCode = clash.uniqueCode;
+
+      const updated = await tx.clash.update({
+        where: { id },
+        data: { deletedAt: null, seq: newSeq, uniqueCode: newCode },
+      });
       await tx.auditLog.create({ data: { clashId: id, actorId: user.id, action: 'restored' } });
+      await tx.auditLog.create({
+        data: {
+          clashId: id,
+          actorId: user.id,
+          action: 'code_reassigned',
+          field: 'uniqueCode',
+          oldValue: oldCode,
+          newValue: newCode,
+        },
+      });
       return updated;
     });
   }

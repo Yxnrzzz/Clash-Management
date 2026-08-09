@@ -3,12 +3,17 @@
 # (next.config.ts) so the runner only needs .next/standalone + static + public
 # copied in, not the full node_modules tree.
 #
-# API_ORIGIN is provided both as a build ARG and a runtime ENV: Next.js
-# reads next.config.ts (which reads process.env.API_ORIGIN for the /api/*
-# rewrite target) when the standalone server boots, but we also bake it in
-# at build time in case a given Next.js version resolves rewrites() during
-# `next build` instead. Override at `docker run -e API_ORIGIN=...` time for
-# the common case (API reachable at a different host in production).
+# API_ORIGIN must be correct at BUILD time, not just runtime. Verified
+# empirically against a real production image (Next.js 16.3.0): rewrites()
+# is evaluated once during `next build` and the resulting destination is
+# baked into the standalone output — `docker run -e API_ORIGIN=...` with a
+# different value at runtime is silently ignored (confirmed by pointing a
+# running container at a nonexistent host via that env var and watching
+# /api/* still resolve to the build-time target). The runtime ENV below
+# exists only so the value is visible via `docker inspect`/`docker exec env`,
+# not because the app reads it again after boot. If you need a different API
+# host, rebuild the image with a different --build-arg API_ORIGIN — don't
+# rely on overriding it at `docker run`/compose time.
 ARG NODE_VERSION=22-alpine
 
 FROM node:${NODE_VERSION} AS deps

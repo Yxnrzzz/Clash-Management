@@ -15,7 +15,18 @@ import { AppModule } from './app.module';
 // called (documented Sentry SDK behavior), so nothing there needs to branch
 // on whether a DSN is configured.
 if (process.env.SENTRY_DSN) {
-  Sentry.init({ dsn: process.env.SENTRY_DSN, tracesSampleRate: 0.1 });
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    tracesSampleRate: 0.1,
+    // Without `environment`, a staging deploy's errors are indistinguishable
+    // from production's in the same Sentry project. `release` is optional —
+    // set it in CI/deploy (e.g. to the git SHA) to get per-deploy grouping;
+    // omitted entirely rather than defaulting to package.json's version,
+    // which nothing bumps on every release and would misleadingly imply
+    // every deploy shares one "release".
+    environment: process.env.NODE_ENV ?? 'development',
+    release: process.env.RELEASE,
+  });
 }
 
 async function bootstrap() {

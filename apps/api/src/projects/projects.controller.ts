@@ -1,10 +1,15 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { SkipProjectScope } from '../common/decorators/skip-project-scope.decorator';
 import { AuthUser } from '../auth/auth.types';
-import { AddProjectMemberDto, CreateProjectDto, UpdateProjectDto } from './dto/project.dto';
+import {
+  AddProjectMemberDto,
+  CreateProjectDto,
+  ListProjectsQueryDto,
+  UpdateProjectDto,
+} from './dto/project.dto';
 import { ProjectsService } from './projects.service';
 
 /** This controller IS the source of "which projects can I use" — it can
@@ -20,10 +25,11 @@ export class ProjectsController {
   }
 
   /** Open to every signed-in user — filtered to their own memberships
-   * unless their role administers every project (see CROSS_PROJECT_ROLES). */
+   * unless their role administers every project (see CROSS_PROJECT_ROLES).
+   * includeArchived is Admin-only (enforced in the service). */
   @Get()
-  listAll(@CurrentUser() user: AuthUser) {
-    return this.projects.listAll(user);
+  listAll(@Query() query: ListProjectsQueryDto, @CurrentUser() user: AuthUser) {
+    return this.projects.listAll(user, query);
   }
 
   @Roles(Role.ADMIN)
@@ -34,8 +40,32 @@ export class ProjectsController {
 
   @Roles(Role.ADMIN)
   @Patch(':id')
-  update(@Param('id') id: string, @Body() dto: UpdateProjectDto) {
-    return this.projects.update(id, dto);
+  update(@Param('id') id: string, @Body() dto: UpdateProjectDto, @CurrentUser() user: AuthUser) {
+    return this.projects.update(id, dto, user);
+  }
+
+  @Roles(Role.ADMIN)
+  @Get(':id/stats')
+  stats(@Param('id') id: string) {
+    return this.projects.stats(id);
+  }
+
+  @Roles(Role.ADMIN)
+  @Post(':id/archive')
+  archive(@Param('id') id: string) {
+    return this.projects.archive(id);
+  }
+
+  @Roles(Role.ADMIN)
+  @Post(':id/unarchive')
+  unarchive(@Param('id') id: string) {
+    return this.projects.unarchive(id);
+  }
+
+  @Roles(Role.ADMIN)
+  @Delete(':id')
+  remove(@Param('id') id: string) {
+    return this.projects.remove(id);
   }
 
   @Roles(Role.ADMIN)

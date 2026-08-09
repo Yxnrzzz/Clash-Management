@@ -9,7 +9,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { MulterError } from 'multer';
 import * as Sentry from '@sentry/node';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 
 /**
  * Last line of defense: anything that reaches here means a route/service
@@ -27,17 +27,27 @@ export class AllExceptionsFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
+    const request = ctx.getRequest<Request & { id?: string }>();
 
     const { status, body } = this.resolve(exception);
 
     if (status >= 500) {
+      // request.id is the same value pino-http/genReqId (app.module.ts)
+      // already put on the X-Request-Id response header — logging it here
+      // too is what makes "user reports error ID X" actually traceable to a
+      // log line, instead of only having the message + stack with no way
+      // to find which request produced them.
       this.logger.error(
-        `Unhandled exception: ${this.describe(exception)}`,
+        `Unhandled exception [requestId=${request.id ?? 'unknown'}]: ${this.describe(exception)}`,
         exception instanceof Error ? exception.stack : undefined,
       );
       // No-op when SENTRY_DSN isn't set (Sentry.init() was never called in
       // main.ts) — safe to call unconditionally.
-      Sentry.captureException(exception);
+      Sentry.captureException(exception, { tags: { requestId: request.id } });
+      // Included only for 5xx, not every 4xx — this is the "something broke
+      // on our end, here's what to quote when you report it" id, not
+      // something a plain validation error needs.
+      body.requestId = request.id;
     }
 
     response.status(status).json(body);

@@ -6,6 +6,8 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 import { LoggerModule } from 'nestjs-pino';
+import type { IncomingMessage, ServerResponse } from 'http';
+import { resolveRequestId } from './common/request-id';
 import { PrismaModule } from './prisma/prisma.module';
 import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
@@ -39,6 +41,16 @@ import { envValidationSchema } from './config/env.validation';
         // Never let request/response logs leak the refresh cookie or the
         // Authorization bearer token.
         redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'],
+        // Without this, pino-http's default req.id is a per-process
+        // incrementing integer — useless for tying a user-reported error
+        // back to a log line, since it resets on every restart and collides
+        // across replicas. Echoed back on the response so the client can
+        // surface it — see AllExceptionsFilter.
+        genReqId: (req: IncomingMessage, res: ServerResponse) => {
+          const id = resolveRequestId(req.headers['x-request-id']);
+          res.setHeader('X-Request-Id', id);
+          return id;
+        },
       },
     }),
     ScheduleModule.forRoot(),

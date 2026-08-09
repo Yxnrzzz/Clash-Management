@@ -52,6 +52,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     { href: "/admin/users", label: "User" },
     { href: "/admin/projects", label: "Proyek" },
     { href: "/admin/master-data", label: "Master Data" },
+    { href: "/admin/trash", label: "Clash Terhapus" },
   ];
 
   return (

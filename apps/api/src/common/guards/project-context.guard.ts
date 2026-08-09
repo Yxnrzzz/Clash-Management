@@ -49,6 +49,20 @@ export class ProjectContextGuard implements CanActivate {
       throw new NotFoundException('Proyek tidak ditemukan.');
     }
 
+    // Guard-level, not resource-level: the client asserted this exact
+    // X-Project-Id and the answer is "that project can no longer be used" —
+    // the same class of rejection as "you are not a member" below, hence
+    // 403 rather than 404. ProjectsController stays @SkipProjectScope()
+    // (class-level) so Admin can still PATCH/unarchive/delete an archived
+    // project through it.
+    if (project.archivedAt) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        code: 'PROJECT_ARCHIVED',
+        message: 'Proyek ini sudah diarsipkan.',
+      });
+    }
+
     if (!CROSS_PROJECT_ROLES.includes(user.role)) {
       const membership = await this.prisma.projectMember.findUnique({
         where: { projectId_userId: { projectId, userId: user.id } },

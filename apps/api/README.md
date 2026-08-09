@@ -94,9 +94,12 @@ JWT_REFRESH_TTL="7d"
 | PATCH | `/api/users/:id` | Admin |
 | PATCH | `/api/users/:id/active` | Admin |
 | GET | `/api/projects/current` | semua yang login |
-| GET | `/api/projects` | semua yang login (di-filter ke keanggotaan sendiri, kecuali `CROSS_PROJECT_ROLES` yang dapat semua proyek — lihat §5) |
+| GET | `/api/projects` | semua yang login (di-filter ke keanggotaan sendiri, kecuali `CROSS_PROJECT_ROLES` yang dapat semua proyek — lihat §5); `?includeArchived=1` Admin-only |
 | POST | `/api/projects` | Admin (buat proyek baru — belum punya disiplin/zona/anggota, lihat di bawah) |
-| PATCH | `/api/projects/:id` | Admin |
+| PATCH | `/api/projects/:id` | Admin (ganti `code` menulis ulang `uniqueCode` setiap clash di proyek itu — lihat di bawah) |
+| GET | `/api/projects/:id/stats` | Admin (`{ totalClashCount, deletedClashCount, archivedAt }` — dipakai dialog konfirmasi rename & tombol hapus) |
+| POST | `/api/projects/:id/archive` \| `/api/projects/:id/unarchive` | Admin |
+| DELETE | `/api/projects/:id` | Admin (hanya kalau `totalClashCount === 0`, kalau tidak `409` — arsipkan sebagai gantinya) |
 | GET \| POST | `/api/projects/:projectId/members` | Admin |
 | DELETE | `/api/projects/:projectId/members/:userId` | Admin |
 | GET | `/api/master-data/disciplines` \| `zones` \| `statuses` \| `priorities` | semua yang login |
@@ -109,6 +112,9 @@ JWT_REFRESH_TTL="7d"
 | GET | `/api/clashes/:id` | semua yang login (clash + komentar + audit log + lampiran) |
 | POST | `/api/clashes` | Engineer, Coordinator, Admin |
 | PATCH | `/api/clashes/:id` | Engineer (item sendiri, status maju 1 langkah saja, tidak boleh menutup), Coordinator/Admin (penuh) |
+| DELETE | `/api/clashes/:id` | Admin (soft delete — `?deleted=1` di `GET /api/clashes` untuk melihat trash) |
+| POST | `/api/clashes/:id/restore` | Admin (kalau kode lamanya sudah dipakai clash lain, dapat kode baru di ujung urutan — lihat di bawah) |
+| GET | `/api/clashes/export` | semua yang login (dibatasi rate, memakai kontrak query yang sama dengan `GET /api/clashes`) |
 | POST | `/api/clashes/bulk` | Coordinator, Admin |
 | POST | `/api/clashes/:id/comments` | Engineer, Coordinator, Admin |
 | POST | `/api/clashes/:id/attachments` | Engineer, Coordinator, Admin (multipart, maks 10 file, 10 MB/file, gambar atau PDF) |
@@ -121,11 +127,11 @@ JWT_REFRESH_TTL="7d"
 
 `POST /api/projects` menerima `{ name, code }` (`code` 2-6 karakter alfanumerik, di-uppercase & di-trim server-side, harus unik — `409` kalau sudah dipakai; `code` jadi awalan `uniqueCode` clash di proyek itu). Proyek baru lahir kosong: belum ada `Discipline`/`Zone`/`ProjectMember` (`Priority`/`Status` global, otomatis ikut) — lengkapi lewat `POST /api/master-data/templates/copy` (salin dari proyek lain) dan `POST /api/projects/:projectId/members`. Frontend (`/admin/projects`) langsung menjadikan proyek baru sebagai proyek aktif setelah dibuat.
 
-`PATCH /api/clashes/:id` menerima subset `{ statusId, priorityId, assigneeId, dueDate }`. Aturan siapa boleh mengubah field mana ditegakkan di `ClashesService` (`assertCanEdit`, `buildAllowedPatch`), bukan cuma `@Roles()` — lihat `src/clashes/clashes.service.ts`. `assigneeId` hanya boleh diisi user Engineer yang aktif (atau `null` untuk melepas assignee) — ditegakkan `ClashesService.assertAssigneeIsEngineer()`, dipanggil dari `buildAllowedPatch()` (jalur `PATCH /api/clashes/:id`) maupun `bulkUpdate()` (jalur `POST /api/clashes/bulk`, yang tidak melalui `buildAllowedPatch`). Setiap field yang benar-benar berubah menulis satu baris `AuditLog`, dengan `oldValue`/`newValue` sudah diterjemahkan ke nama (bukan id mentah). `uniqueCode` pada `POST /api/clashes` dibuat server-side dalam transaksi, format `{kode-proyek}-{kode-disiplin}-{urutan 4 digit}`.
+`PATCH /api/clashes/:id` menerima subset `{ statusId, priorityId, assigneeId, dueDate }`. Aturan siapa boleh mengubah field mana ditegakkan di `ClashesService` (`assertCanEdit`, `buildAllowedPatch`), bukan cuma `@Roles()` — lihat `src/clashes/clashes.service.ts`. `assigneeId` hanya boleh diisi user Engineer yang aktif (atau `null` untuk melepas assignee) — ditegakkan `ClashesService.assertAssigneeIsEngineer()`, dipanggil dari `buildAllowedPatch()` (jalur `PATCH /api/clashes/:id`) maupun `bulkUpdate()` (jalur `POST /api/clashes/bulk`, yang tidak melalui `buildAllowedPatch`). Setiap field yang benar-benar berubah menulis satu baris `AuditLog`, dengan `oldValue`/`newValue` sudah diterjemahkan ke nama (bukan id mentah). `uniqueCode` pada `POST /api/clashes` dibuat server-side dalam transaksi, format `{kode-proyek}-{kode-disiplin}-{urutan 4 digit}`, dengan nomor urut (`seq`) mengisi celah yang ditinggalkan clash yang di-soft-delete di disiplin yang sama (lihat `src/clashes/clash-code.ts`). Rename `PATCH /api/projects/:id` (kode proyek) atau `PATCH /api/master-data/disciplines/:id` (kode disiplin) menulis ulang `uniqueCode` setiap clash terkait dalam satu transaksi dan mencatat `AuditLog` action `code_changed` per clash.
 
 ### `GET /api/clashes` — query params
 
-Semua opsional: `q` (cari di kode/judul/deskripsi), `disc`/`stat`/`prio`/`zone`/`assignee` (csv id), `reporterId`, `cf`/`ct` (tanggal dibuat dari/sampai, `YYYY-MM-DD`), `overdue` (`1`), `sort` (`kodeUnik`\|`judul`\|`status`\|`priority`\|`dueDate`\|`createdAt`, default `createdAt`), `dir` (`asc`\|`desc`, default `desc`), `page` (default `1`), `pageSize` (default `10`, maksimum `10000`). Respons: `{ data: Clash[], total: number }`. `pageSize=10000` dipakai oleh tombol export Register untuk mengambil seluruh hasil filter tanpa endpoint terpisah.
+Semua opsional: `q` (cari di kode/judul/deskripsi), `disc`/`stat`/`prio`/`zone`/`assignee` (csv id), `reporterId`, `cf`/`ct` (tanggal dibuat dari/sampai, `YYYY-MM-DD`), `overdue` (`1`), `deleted` (`1`, Admin only — trash bin), `sort` (`kodeUnik`\|`judul`\|`status`\|`priority`\|`dueDate`\|`createdAt`, default `createdAt`), `dir` (`asc`\|`desc`, default `desc`), `page` (default `1`), `pageSize` (default `10`, maksimum `500`). Respons: `{ data: Clash[], total: number }`. `GET /api/clashes/export` (rate-limited, 10/menit) memakai kontrak query yang sama tanpa batas `pageSize` untuk mengambil seluruh hasil filter.
 
 ### `GET /api/clashes/metrics` — query params
 

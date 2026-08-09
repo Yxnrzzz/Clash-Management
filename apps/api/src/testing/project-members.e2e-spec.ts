@@ -5,6 +5,7 @@ import { Role } from '@prisma/client';
 import request from 'supertest';
 import { ProjectsModule } from '../projects/projects.module';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { ProjectContextGuard } from '../common/guards/project-context.guard';
 
@@ -120,6 +121,12 @@ describe('Project membership endpoints (RBAC + validation)', () => {
     const moduleRef = await Test.createTestingModule({ imports: [TestAppModule] })
       .overrideProvider(PrismaService)
       .useValue(fakePrisma)
+      // ProjectsModule now depends on StorageModule (ProjectsService.remove
+      // deletes ImportJob files on disk) — none of these tests touch
+      // DELETE /projects/:id, so a bare mock avoids pulling in ConfigModule
+      // just to satisfy StorageService's constructor.
+      .overrideProvider(StorageService)
+      .useValue({ delete: jest.fn() })
       .compile();
 
     app = moduleRef.createNestApplication();

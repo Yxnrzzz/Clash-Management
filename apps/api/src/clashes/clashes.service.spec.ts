@@ -1,5 +1,5 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import { ClashesService } from './clashes.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
@@ -51,6 +51,7 @@ function baseClash(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: 'clash-1',
     uniqueCode: 'MCA-ARS-0001',
+    seq: 1,
     projectId: PROJECT.id,
     title: 'Bentrok pipa',
     description: 'Deskripsi',
@@ -68,12 +69,22 @@ function baseClash(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+const DISCIPLINE_ARS = { id: 'disc-ars', projectId: PROJECT.id, code: 'ARS', name: 'Arsitektur' };
+
 /**
  * A hand-rolled Prisma mock, in the same spirit as auth.service.spec.ts:
  * findUnique/findFirst resolve from the fixed lookup tables above, count and
  * $transaction are stubbed just enough for each test's path.
+ *
+ * `conflictClash`, if given, is what clash.findFirst returns for restore()'s
+ * "is my old code/seq still free" check (a shape distinguishable from
+ * assertClashInProject's by-id lookup because it has no `id` key) — leave it
+ * undefined for the common "nothing else has claimed it" fast path.
  */
-function makePrisma(clash: ReturnType<typeof baseClash> | null) {
+function makePrisma(
+  clash: ReturnType<typeof baseClash> | null,
+  opts: { conflictClash?: Record<string, unknown> | null } = {},
+) {
   const clashRecord = clash;
 
   const status = {
@@ -94,13 +105,17 @@ function makePrisma(clash: ReturnType<typeof baseClash> | null) {
   };
   const clashDelegate = {
     findUnique: jest.fn(() => Promise.resolve(clashRecord)),
-    // Simulates NOT_DELETED filtering: assertClashInProject passes
-    // `deletedAt: null` in `where` unless includeDeleted is set, in which
-    // case that key is absent entirely — see clashes.service.ts.
-    findFirst: jest.fn(({ where }: { where: { deletedAt?: null } }) => {
-      if (!clashRecord) return Promise.resolve(null);
-      if ('deletedAt' in where && clashRecord.deletedAt) return Promise.resolve(null);
-      return Promise.resolve(clashRecord);
+    // Two different callers share findFirst with different `where` shapes:
+    // assertClashInProject looks up by `id` (NOT_DELETED filtering: passes
+    // `deletedAt: null` unless includeDeleted is set); restore()'s conflict
+    // check has no `id`, just disciplineId/deletedAt/OR.
+    findFirst: jest.fn(({ where }: { where: Record<string, unknown> }) => {
+      if ('id' in where) {
+        if (!clashRecord) return Promise.resolve(null);
+        if ('deletedAt' in where && clashRecord.deletedAt) return Promise.resolve(null);
+        return Promise.resolve(clashRecord);
+      }
+      return Promise.resolve(opts.conflictClash ?? null);
     }),
     findMany: jest.fn(() => Promise.resolve(clashRecord ? [clashRecord] : [])),
     count: jest.fn(() => Promise.resolve(0)),
@@ -119,6 +134,17 @@ function makePrisma(clash: ReturnType<typeof baseClash> | null) {
     findUnique: jest.fn(({ where: { id } }: { where: { id: string } }) =>
       Promise.resolve(id === PROJECT.id ? PROJECT : null),
     ),
+    findUniqueOrThrow: jest.fn(({ where: { id } }: { where: { id: string } }) =>
+      id === PROJECT.id ? Promise.resolve(PROJECT) : Promise.reject(new Error('not found')),
+    ),
+  };
+  const discipline = {
+    findUnique: jest.fn(({ where: { id } }: { where: { id: string } }) =>
+      Promise.resolve(id === DISCIPLINE_ARS.id ? DISCIPLINE_ARS : null),
+    ),
+    findUniqueOrThrow: jest.fn(({ where: { id } }: { where: { id: string } }) =>
+      id === DISCIPLINE_ARS.id ? Promise.resolve(DISCIPLINE_ARS) : Promise.reject(new Error('not found')),
+    ),
   };
   const comment = {
     findMany: jest.fn(() => Promise.resolve([])),
@@ -134,9 +160,18 @@ function makePrisma(clash: ReturnType<typeof baseClash> | null) {
   const annotation = {
     deleteMany: jest.fn(),
   };
+  // Default: "no gap" — allocateLowestFreeSeq's cheap aggregate path (count
+  // === max) returns max+1 without a second query. Individual tests override
+  // this with mockResolvedValueOnce chains for gap-filling/contested cases.
+  const queryRaw = jest.fn<
+    Promise<Array<{ count: bigint; max: number } | { seq: number }>>,
+    unknown[]
+  >(() => Promise.resolve([{ count: BigInt(0), max: 0 }]));
+  const executeRaw = jest.fn(() => Promise.resolve(undefined));
 
   const prisma = {
     project,
+    discipline,
     status,
     priority,
     user,
@@ -145,12 +180,23 @@ function makePrisma(clash: ReturnType<typeof baseClash> | null) {
     comment,
     attachment,
     annotation,
+    $queryRaw: queryRaw,
+    $executeRaw: executeRaw,
     $transaction: jest.fn((fn: (tx: unknown) => Promise<unknown>) =>
-      fn({ clash: clashDelegate, auditLog, attachment, annotation }),
+      fn({
+        clash: clashDelegate,
+        auditLog,
+        attachment,
+        annotation,
+        project,
+        discipline,
+        $queryRaw: queryRaw,
+        $executeRaw: executeRaw,
+      }),
     ),
   } as unknown as PrismaService;
 
-  return { prisma, clashDelegate, auditLog, comment, attachment, annotation };
+  return { prisma, clashDelegate, auditLog, comment, attachment, annotation, queryRaw, executeRaw };
 }
 
 describe('ClashesService.update — RBAC', () => {
@@ -426,17 +472,19 @@ describe('ClashesService.bulkUpdate', () => {
 });
 
 describe('ClashesService.create', () => {
-  it('builds a uniqueCode as PROJECT-DISCIPLINE-NNNN and writes a "created" audit row', async () => {
-    const { prisma, clashDelegate, auditLog } = makePrisma(null);
-    const discipline = { id: 'disc-ars', projectId: PROJECT.id, code: 'ARS', name: 'Arsitektur' };
+  function withZone(prisma: PrismaService) {
     const zone = { id: 'zone-1', projectId: PROJECT.id, name: 'Zona A', level: 'Lantai 1' };
-    (prisma as unknown as { discipline: unknown }).discipline = {
-      findUnique: jest.fn(() => Promise.resolve(discipline)),
-    };
     (prisma as unknown as { zone: unknown }).zone = {
       findUnique: jest.fn(() => Promise.resolve(zone)),
     };
-    (clashDelegate.count as jest.Mock).mockResolvedValue(4);
+  }
+
+  it('builds a uniqueCode as PROJECT-DISCIPLINE-NNNN (no gap) and writes a "created" audit row', async () => {
+    const { prisma, clashDelegate, auditLog, queryRaw } = makePrisma(null);
+    withZone(prisma);
+    // No gap: 4 live rows, max seq 4 — allocateLowestFreeSeq's cheap path
+    // returns max+1 without a second (generate_series) query.
+    queryRaw.mockResolvedValue([{ count: BigInt(4), max: 4 }]);
     (clashDelegate.create as jest.Mock).mockImplementation(
       ({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'clash-new', ...data }),
     );
@@ -452,9 +500,10 @@ describe('ClashesService.create', () => {
       },
       engineer,
       PROJECT.id,
-    )) as { uniqueCode: string; reporterId: string };
+    )) as { uniqueCode: string; seq: number; reporterId: string };
 
     expect(created.uniqueCode).toBe('MCA-ARS-0005');
+    expect(created.seq).toBe(5);
     expect(created.reporterId).toBe('u-eng');
     expect(auditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -463,26 +512,22 @@ describe('ClashesService.create', () => {
     );
   });
 
-  it('counts the uniqueCode sequence without filtering out soft-deleted clashes', async () => {
-    // Regression guard: filtering this count by deletedAt would let a
-    // deleted clash's uniqueCode be regenerated for a new row, which then
-    // collides on the second (retry) attempt too and hard-fails creation.
-    const { prisma, clashDelegate } = makePrisma(null);
-    const discipline = { id: 'disc-ars', projectId: PROJECT.id, code: 'ARS', name: 'Arsitektur' };
-    const zone = { id: 'zone-1', projectId: PROJECT.id, name: 'Zona A', level: 'Lantai 1' };
-    (prisma as unknown as { discipline: unknown }).discipline = {
-      findUnique: jest.fn(() => Promise.resolve(discipline)),
-    };
-    (prisma as unknown as { zone: unknown }).zone = {
-      findUnique: jest.fn(() => Promise.resolve(zone)),
-    };
-    (clashDelegate.count as jest.Mock).mockResolvedValue(0);
+  it('allocates the lowest free sequence, filling a gap left by a soft-deleted clash', async () => {
+    // Regression guard for the inverse of the old invariant: a soft-deleted
+    // clash's seq/uniqueCode is now reusable — 3 live rows but max seq is 3
+    // means one of 1..3 is free (a prior clash there was deleted), and the
+    // allocator must pick that gap (2) rather than appending at 4.
+    const { prisma, clashDelegate, queryRaw, executeRaw } = makePrisma(null);
+    withZone(prisma);
+    queryRaw
+      .mockResolvedValueOnce([{ count: BigInt(2), max: 3 }])
+      .mockResolvedValueOnce([{ seq: 2 }]);
     (clashDelegate.create as jest.Mock).mockImplementation(
       ({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'clash-new', ...data }),
     );
 
     const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
-    await service.create(
+    const created = (await service.create(
       {
         title: 'Judul',
         description: 'Deskripsi',
@@ -492,9 +537,46 @@ describe('ClashesService.create', () => {
       },
       engineer,
       PROJECT.id,
-    );
+    )) as { uniqueCode: string; seq: number };
 
-    expect(clashDelegate.count).toHaveBeenCalledWith({ where: { disciplineId: 'disc-ars' } });
+    expect(created.uniqueCode).toBe('MCA-ARS-0002');
+    expect(created.seq).toBe(2);
+    // The advisory lock must be taken before allocating, to serialize
+    // concurrent creates in the same discipline — see clash-code.ts.
+    expect(executeRaw).toHaveBeenCalled();
+  });
+
+  it('retries once on a code/seq race (P2002) and succeeds on the second attempt', async () => {
+    const { prisma, clashDelegate, queryRaw } = makePrisma(null);
+    withZone(prisma);
+    queryRaw.mockResolvedValue([{ count: BigInt(0), max: 0 }]);
+    (clashDelegate.create as jest.Mock)
+      .mockImplementationOnce(() => {
+        throw new Prisma.PrismaClientKnownRequestError('unique violation', {
+          code: 'P2002',
+          clientVersion: 'test',
+          meta: { target: ['uniqueCode'] },
+        });
+      })
+      .mockImplementationOnce(({ data }: { data: Record<string, unknown> }) =>
+        Promise.resolve({ id: 'clash-new', ...data }),
+      );
+
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+    const created = (await service.create(
+      {
+        title: 'Judul',
+        description: 'Deskripsi',
+        disciplineId: 'disc-ars',
+        zoneId: 'zone-1',
+        priorityId: 'pr-low',
+      },
+      engineer,
+      PROJECT.id,
+    )) as { uniqueCode: string };
+
+    expect(created.uniqueCode).toBe('MCA-ARS-0001');
+    expect(clashDelegate.create).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -1054,6 +1136,42 @@ describe('ClashesService.restore', () => {
     });
     expect(auditLog.create).toHaveBeenCalledWith({
       data: { clashId: 'clash-1', actorId: 'u-admin', action: 'restored' },
+    });
+  });
+
+  it('allocates a fresh seq at the end and records code_reassigned when the old code/seq was taken', async () => {
+    // Another live clash now occupies disc-ars/seq 1 (MCA-ARS-0001) — the
+    // clash being restored can't have its old code back.
+    const { prisma, clashDelegate, auditLog, queryRaw } = makePrisma(
+      baseClash({ deletedAt: new Date('2026-07-10'), uniqueCode: 'MCA-ARS-0001', seq: 1 }),
+      { conflictClash: { id: 'clash-other' } },
+    );
+    queryRaw.mockResolvedValueOnce([{ seq: 9 }]); // allocateNextSeq
+    const service = new ClashesService(prisma, fakeStorage, fakeNotifications);
+
+    const updated = (await service.restore('clash-1', admin, PROJECT.id)) as {
+      seq: number;
+      uniqueCode: string;
+    };
+
+    expect(updated.seq).toBe(9);
+    expect(updated.uniqueCode).toBe('MCA-ARS-0009');
+    expect(clashDelegate.update).toHaveBeenCalledWith({
+      where: { id: 'clash-1' },
+      data: { deletedAt: null, seq: 9, uniqueCode: 'MCA-ARS-0009' },
+    });
+    expect(auditLog.create).toHaveBeenCalledWith({
+      data: { clashId: 'clash-1', actorId: 'u-admin', action: 'restored' },
+    });
+    expect(auditLog.create).toHaveBeenCalledWith({
+      data: {
+        clashId: 'clash-1',
+        actorId: 'u-admin',
+        action: 'code_reassigned',
+        field: 'uniqueCode',
+        oldValue: 'MCA-ARS-0001',
+        newValue: 'MCA-ARS-0009',
+      },
     });
   });
 

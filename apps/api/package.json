@@ -14,7 +14,8 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "prisma db seed",
     "seed:load-test": "ts-node prisma/seed-load-test.ts",
-    "seed:load-test:cleanup": "ts-node prisma/seed-load-test.ts --cleanup"
+    "seed:load-test:cleanup": "ts-node prisma/seed-load-test.ts --cleanup",
+    "check:clash-seq": "ts-node scripts/check-clash-seq.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"

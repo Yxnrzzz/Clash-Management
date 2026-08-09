@@ -17,6 +17,7 @@ export function makeProject(overrides: Partial<Project> = {}): Project {
     id: "p1",
     nama: "Project One",
     kode: "P1",
+    archivedAt: null,
     ...overrides,
   };
 }

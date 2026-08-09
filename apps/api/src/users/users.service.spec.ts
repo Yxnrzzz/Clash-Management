@@ -2,6 +2,7 @@ import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Role, User } from '@prisma/client';
 import { UsersService } from './users.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { AuthUser } from '../auth/auth.types';
 
 function makeUser(overrides: Partial<User> = {}): User {
   return {
@@ -35,7 +36,7 @@ function applyPrismaData(user: User, data: Record<string, unknown>): User {
   return result as User;
 }
 
-function makePrisma(users: User[] = []) {
+function makePrisma(users: User[] = [], memberships: { projectId: string; userId: string }[] = []) {
   const store = new Map(users.map((u) => [u.id, u]));
   let nextId = 1;
 
@@ -46,11 +47,20 @@ function makePrisma(users: User[] = []) {
       create: jest.Mock;
       update: jest.Mock;
     };
+    projectMember: { findMany: jest.Mock };
     refreshSession: { updateMany: jest.Mock };
     $transaction: jest.Mock;
   } = {
     user: {
-      findMany: jest.fn(() => Promise.resolve([...store.values()])),
+      findMany: jest.fn(({ where }: { where?: { projectMemberships?: { some: { projectId: { in: string[] } } } } } = {}) => {
+        const allUsers = [...store.values()];
+        const projectIds = where?.projectMemberships?.some.projectId.in;
+        if (!projectIds) return Promise.resolve(allUsers);
+        const memberUserIds = new Set(
+          memberships.filter((m) => projectIds.includes(m.projectId)).map((m) => m.userId),
+        );
+        return Promise.resolve(allUsers.filter((u) => memberUserIds.has(u.id)));
+      }),
       findUnique: jest.fn(({ where }: { where: { id?: string; email?: string } }) =>
         Promise.resolve(
           where.id
@@ -70,6 +80,11 @@ function makePrisma(users: User[] = []) {
         store.set(where.id, updated);
         return Promise.resolve(updated);
       }),
+    },
+    projectMember: {
+      findMany: jest.fn(({ where }: { where: { userId: string } }) =>
+        Promise.resolve(memberships.filter((m) => m.userId === where.userId).map((m) => ({ projectId: m.projectId }))),
+      ),
     },
     refreshSession: {
       updateMany: jest.fn(() => Promise.resolve({ count: 0 })),
@@ -160,5 +175,50 @@ describe('UsersService.resetPassword', () => {
     const service = new UsersService(prisma);
 
     await expect(service.resetPassword('ghost')).rejects.toThrow(NotFoundException);
+  });
+});
+
+describe('UsersService.findAll — directory scoping', () => {
+  const admin: AuthUser = { id: 'u-admin', email: 'admin@x.dev', role: Role.ADMIN };
+  const engineer: AuthUser = { id: 'u-eng', email: 'eng@x.dev', role: Role.ENGINEER };
+  const otherEngineer: AuthUser = { id: 'u-eng-2', email: 'eng2@x.dev', role: Role.ENGINEER };
+  const strangerEngineer: AuthUser = { id: 'u-eng-3', email: 'eng3@x.dev', role: Role.ENGINEER };
+
+  const users = [
+    makeUser({ id: admin.id, role: Role.ADMIN }),
+    makeUser({ id: engineer.id, role: Role.ENGINEER }),
+    makeUser({ id: otherEngineer.id, role: Role.ENGINEER }),
+    makeUser({ id: strangerEngineer.id, role: Role.ENGINEER }),
+  ];
+  const memberships = [
+    { projectId: 'proj-1', userId: engineer.id },
+    { projectId: 'proj-1', userId: otherEngineer.id },
+    { projectId: 'proj-2', userId: strangerEngineer.id },
+  ];
+
+  it('returns the full directory for a cross-project role (Admin/Management/Coordinator)', async () => {
+    const { prisma } = makePrisma(users, memberships);
+    const service = new UsersService(prisma);
+
+    const result = await service.findAll(admin);
+    expect(result.map((u) => u.id).sort()).toEqual(users.map((u) => u.id).sort());
+  });
+
+  it('scopes an Engineer to users who share at least one project with them', async () => {
+    const { prisma } = makePrisma(users, memberships);
+    const service = new UsersService(prisma);
+
+    const result = await service.findAll(engineer);
+    expect(result.map((u) => u.id).sort()).toEqual([engineer.id, otherEngineer.id].sort());
+    expect(result.some((u) => u.id === strangerEngineer.id)).toBe(false);
+  });
+
+  it('returns an empty list for an Engineer with no project membership at all', async () => {
+    const { prisma } = makePrisma(users, memberships);
+    const service = new UsersService(prisma);
+
+    const newUser: AuthUser = { id: 'u-eng-new', email: 'new@x.dev', role: Role.ENGINEER };
+    const result = await service.findAll(newUser);
+    expect(result).toEqual([]);
   });
 });

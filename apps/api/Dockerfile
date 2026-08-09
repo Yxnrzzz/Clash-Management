@@ -28,11 +28,22 @@ RUN npm run build
 # `npm ci --omit=dev` here would NOT recreate (prisma the CLI is a
 # devDependency, deliberately not installed in this stage) — so it's
 # copied over from the builder stage explicitly.
+#
+# The `prisma` CLI itself (also a devDependency) is copied over the same
+# way, together with the rest of the @prisma/* scope it depends on
+# (engines, fetch-engine, ...) — `docker compose exec api npx prisma
+# migrate deploy` is the documented deploy step (see docker-compose.prod.yml),
+# and without this it would try to download the CLI from the network at
+# deploy time, which fails outright on an air-gapped host and is an
+# unnecessary external dependency on any host.
 FROM node:${NODE_VERSION} AS prod-deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
+COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=builder /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
 
 FROM node:${NODE_VERSION} AS runner
 WORKDIR /app

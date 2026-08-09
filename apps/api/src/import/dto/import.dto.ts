@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsBoolean, IsOptional, IsString, MinLength, ValidateNested } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, Matches, MinLength, ValidateNested } from 'class-validator';
 
 /**
  * Mapping values are source column headers picked in the wizard's step 2,
@@ -37,9 +37,12 @@ export class ImportMappingDto {
 }
 
 export class CommitImportDto {
-  // = the storageKey returned by POST /import/preview.
+  // = the storageKey returned by POST /import/preview — always
+  // `imports/<uuid>-<sanitized-filename>` (see StorageService.saveFromPath).
+  // Constrained to that shape, not just non-empty, so this can never be used
+  // to make StorageService open an arbitrary path outside its own prefix.
   @IsString()
-  @MinLength(1, { message: 'Token file tidak valid, ulangi upload.' })
+  @Matches(/^imports\/[A-Za-z0-9._-]+$/, { message: 'Token file tidak valid, ulangi upload.' })
   token!: string;
 
   @IsString()

@@ -1,7 +1,9 @@
 import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
 import { Role } from '@prisma/client';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { SkipProjectScope } from '../common/decorators/skip-project-scope.decorator';
+import { AuthUser } from '../auth/auth.types';
 import { CreateUserDto, SetActiveDto, UpdateUserDto } from './dto/user.dto';
 import { UsersService } from './users.service';
 
@@ -11,10 +13,12 @@ import { UsersService } from './users.service';
 export class UsersController {
   constructor(private readonly users: UsersService) {}
 
-  /** Open to every signed-in user — the Register needs the assignee list. */
+  /** Open to every signed-in user — the Register needs the assignee list —
+   * but scoped by role inside UsersService.findAll: an Engineer only sees
+   * users who share a project with them, not the whole org's directory. */
   @Get()
-  findAll() {
-    return this.users.findAll();
+  findAll(@CurrentUser() user: AuthUser) {
+    return this.users.findAll(user);
   }
 
   @Roles(Role.ADMIN)

@@ -83,4 +83,29 @@ describe('ProjectContextGuard', () => {
       await expect(guard.canActivate(context)).resolves.toBe(true);
     },
   );
+
+  it('rejects an archived project with 403 PROJECT_ARCHIVED, even for a cross-project role', async () => {
+    const { context, reflector } = contextWith(admin, 'proj-1', false);
+    const prisma = {
+      project: { findUnique: jest.fn(() => Promise.resolve({ id: 'proj-1', archivedAt: new Date() })) },
+      projectMember: { findUnique: jest.fn() },
+    } as unknown as PrismaService;
+    const guard = new ProjectContextGuard(prisma, reflector);
+
+    await expect(guard.canActivate(context)).rejects.toMatchObject({
+      status: 403,
+      response: expect.objectContaining({ code: 'PROJECT_ARCHIVED' }),
+    });
+  });
+
+  it('does not reject a project whose archivedAt is null', async () => {
+    const { context, reflector } = contextWith(engineer, 'proj-1', false);
+    const prisma = {
+      project: { findUnique: jest.fn(() => Promise.resolve({ id: 'proj-1', archivedAt: null })) },
+      projectMember: { findUnique: jest.fn(() => Promise.resolve({ projectId: 'proj-1', userId: engineer.id })) },
+    } as unknown as PrismaService;
+    const guard = new ProjectContextGuard(prisma, reflector);
+
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+  });
 });

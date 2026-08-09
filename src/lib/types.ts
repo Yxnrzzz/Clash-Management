@@ -13,6 +13,7 @@ export interface Project {
   id: string;
   nama: string;
   kode: string;
+  archivedAt: string | null;
 }
 
 export interface Discipline {

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Prisma, PrismaClient, Role } from '@prisma/client';
 import { hash } from '@node-rs/argon2';
+import { formatClashCode } from '../src/clashes/clash-code';
 
 const prisma = new PrismaClient();
 
@@ -190,14 +191,14 @@ async function seedClashes(projectCode: string) {
     const closedAt = status.isClosedState ? addDays(createdAt, 3 + Math.floor(rng() * 20)) : null;
 
     disciplineCounters[discipline.code] = (disciplineCounters[discipline.code] ?? 0) + 1;
-    const uniqueCode = `${projectCode}-${discipline.code}-${String(
-      disciplineCounters[discipline.code],
-    ).padStart(4, '0')}`;
+    const seq = disciplineCounters[discipline.code];
+    const uniqueCode = formatClashCode(projectCode, discipline.code, seq);
     const id = randomUUID();
 
     clashRows.push({
       id,
       uniqueCode,
+      seq,
       projectId: PROJECT.id,
       title: pick(rng, CLASH_TITLES),
       description: CLASH_DESCRIPTION,
@@ -292,13 +293,13 @@ async function seedProject2Clashes() {
     const id = randomUUID();
 
     disciplineCounters[discipline.code] = (disciplineCounters[discipline.code] ?? 0) + 1;
-    const uniqueCode = `${PROJECT_2.code}-${discipline.code}-${String(
-      disciplineCounters[discipline.code],
-    ).padStart(4, '0')}`;
+    const seq = disciplineCounters[discipline.code];
+    const uniqueCode = formatClashCode(PROJECT_2.code, discipline.code, seq);
 
     clashRows.push({
       id,
       uniqueCode,
+      seq,
       projectId: PROJECT_2.id,
       title: pick(rng, CLASH_TITLES),
       description: CLASH_DESCRIPTION,

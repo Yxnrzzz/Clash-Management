@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import {
+  ApiError,
   apiDelete,
   apiGet,
   apiPatch,
@@ -94,7 +95,7 @@ const PATCH_DEBOUNCE_MS = 500;
 /** Remembers the user's pick across reloads — see setActiveProject() below. */
 const ACTIVE_PROJECT_STORAGE_KEY = "clashhub:activeProjectId";
 
-const EMPTY_PROJECT: Project = { id: "", nama: "", kode: "" };
+const EMPTY_PROJECT: Project = { id: "", nama: "", kode: "", archivedAt: null };
 
 /** Everything comes from the API — this is the whole client-side state. */
 interface MasterState {
@@ -168,7 +169,27 @@ interface DataContextValue extends MasterState {
   /** Admin-only — creates the project and switches to it immediately (it
    * starts with no disciplines/zones/members for the admin to set up next). */
   createProject: (input: Pick<Project, "nama" | "kode">) => Promise<Project>;
-  updateProject: (patch: Partial<Pick<Project, "nama" | "kode">>) => void;
+  /** Debounced optimistic update, same pattern as updateUser/updateDiscipline
+   * etc — safe because a name change never touches clash codes. */
+  updateProjectName: (nama: string) => void;
+  /**
+   * NOT debounced/optimistic like the other master-data updaters: a code
+   * change rewrites every clash's uniqueCode in this project server-side, so
+   * the caller needs to await the result (and its 409 on a colliding code)
+   * rather than have it silently retried/rolled back like schedulePatch
+   * does. Returns how many clash codes were rewritten, for a confirmation
+   * toast/dialog.
+   */
+  renameProjectCode: (patch: { kode: string; nama?: string }) => Promise<{ rewrittenClashCount: number }>;
+  /** Admin-only. Reversibly hides the project from the switcher and
+   * GET /projects; if it was the active project, falls back to another one
+   * (or EMPTY_PROJECT) the same way a stale localStorage id already does. */
+  archiveProject: (id: string) => Promise<void>;
+  unarchiveProject: (id: string) => Promise<void>;
+  /** Admin-only. Only succeeds when the project has zero clashes (see
+   * ProjectsService.remove) — the caller is expected to have checked via
+   * getProjectStats first, but this still surfaces the server's 409 if not. */
+  deleteProject: (id: string) => Promise<void>;
 
   createUser: (
     input: Pick<User, "nama" | "email" | "peran">
@@ -235,8 +256,15 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       const activeProject = projects.find((p) => p.id === storedId) ?? projects[0] ?? EMPTY_PROJECT;
 
       setActiveProjectId(activeProject.id || null);
-      if (typeof window !== "undefined" && activeProject.id) {
-        window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, activeProject.id);
+      if (typeof window !== "undefined") {
+        if (activeProject.id) {
+          window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, activeProject.id);
+        } else {
+          // No project at all (or the stored id no longer resolves to one) —
+          // drop the stale id instead of leaving a ghost that keeps missing
+          // on every future reload.
+          window.localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
+        }
       }
 
       // Disciplines/zones are per-project; only fetch them once a project is
@@ -264,6 +292,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       });
       setSyncError(null);
     } catch (error) {
+      if (error instanceof ApiError && error.code === "PROJECT_ARCHIVED") {
+        // The stored active project was archived server-side (e.g. by an
+        // Admin in another tab) since the id was last saved — drop it and
+        // retry once, same recovery as a plain stale/missing id.
+        if (typeof window !== "undefined") window.localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
+        setActiveProjectId(null);
+        return reloadMasterData();
+      }
       setSyncError(messageOf(error));
     } finally {
       setMasterResolved(true);
@@ -573,22 +609,99 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     [patchMaster, runWrite]
   );
 
-  const updateProject = useCallback(
-    (patch: Partial<Pick<Project, "nama" | "kode">>) => {
+  const updateProjectName = useCallback(
+    (nama: string) => {
       let projectId = "";
       patchMaster((prev) => {
         projectId = prev.project.id;
         return {
           ...prev,
-          project: { ...prev.project, ...patch },
-          projects: prev.projects.map((p) => (p.id === projectId ? { ...p, ...patch } : p)),
+          project: { ...prev.project, nama },
+          projects: prev.projects.map((p) => (p.id === projectId ? { ...p, nama } : p)),
         };
       });
       if (projectId) {
-        schedulePatch(`project:${projectId}`, `/projects/${projectId}`, projectPayload(patch));
+        schedulePatch(`project:${projectId}`, `/projects/${projectId}`, projectPayload({ nama }));
       }
     },
     [patchMaster, schedulePatch]
+  );
+
+  const renameProjectCode = useCallback(
+    async (patch: { kode: string; nama?: string }): Promise<{ rewrittenClashCount: number }> => {
+      const projectId = master?.project.id;
+      if (!projectId) throw new Error("Belum ada proyek aktif.");
+
+      // Cancel any pending debounced name-only patch for this project so it
+      // can't race this call and overwrite the name it just set — see
+      // updateProjectName. Not a concern the other direction: this call is
+      // always awaited by its caller before anything else touches the form.
+      const pendingKey = `project:${projectId}`;
+      const pending = pendingPatches.current.get(pendingKey);
+      if (pending) {
+        clearTimeout(pending.timer);
+        pendingPatches.current.delete(pendingKey);
+      }
+
+      const result = await runWrite(
+        () =>
+          apiPatch<ApiProject & { rewrittenClashCount: number }>(
+            `/projects/${projectId}`,
+            projectPayload(patch)
+          ),
+        (updated) => {
+          const project = toProject(updated);
+          patchMaster((prev) => ({
+            ...prev,
+            project,
+            projects: prev.projects.map((p) => (p.id === projectId ? project : p)),
+          }));
+        }
+      );
+      return { rewrittenClashCount: result.rewrittenClashCount };
+    },
+    [master, patchMaster, runWrite]
+  );
+
+  const archiveProject = useCallback(
+    async (id: string): Promise<void> => {
+      await runWrite(
+        () => apiPost<ApiProject>(`/projects/${id}/archive`),
+        () => {}
+      );
+      if (master?.project.id === id) {
+        setActiveProjectId(null);
+        if (typeof window !== "undefined") window.localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
+      }
+      await reloadMasterData();
+    },
+    [master, runWrite, reloadMasterData]
+  );
+
+  const unarchiveProject = useCallback(
+    async (id: string): Promise<void> => {
+      await runWrite(
+        () => apiPost<ApiProject>(`/projects/${id}/unarchive`),
+        () => {}
+      );
+      await reloadMasterData();
+    },
+    [runWrite, reloadMasterData]
+  );
+
+  const deleteProject = useCallback(
+    async (id: string): Promise<void> => {
+      await runWrite(
+        () => apiDelete<{ id: string }>(`/projects/${id}`),
+        () => {}
+      );
+      if (master?.project.id === id) {
+        setActiveProjectId(null);
+        if (typeof window !== "undefined") window.localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
+      }
+      await reloadMasterData();
+    },
+    [master, runWrite, reloadMasterData]
   );
 
   // --- Users ----------------------------------------------------------------
@@ -826,7 +939,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       uploadAttachments,
       deleteAttachment,
       createProject,
-      updateProject,
+      updateProjectName,
+      renameProjectCode,
+      archiveProject,
+      unarchiveProject,
+      deleteProject,
       createUser,
       updateUser,
       toggleUserActive,
@@ -859,7 +976,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       uploadAttachments,
       deleteAttachment,
       createProject,
-      updateProject,
+      updateProjectName,
+      renameProjectCode,
+      archiveProject,
+      unarchiveProject,
+      deleteProject,
       createUser,
       updateUser,
       toggleUserActive,

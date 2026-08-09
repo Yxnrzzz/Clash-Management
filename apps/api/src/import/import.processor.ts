@@ -188,7 +188,10 @@ export class ImportProcessor extends WorkerHost {
     // this check would just make the create attempt hit that constraint
     // instead and land in the same "skipped" outcome via
     // DuplicateExternalIdError below — leaving it unfiltered keeps the
-    // clean path and means a re-import never resurrects a deleted row.
+    // clean path and means a re-import never resurrects a deleted row. This
+    // is now the ONLY thing providing that guarantee — unlike externalId,
+    // uniqueCode/seq themselves ARE freed on delete (see clash-code.ts), so
+    // do not make this constraint deletedAt-partial too.
     const externalId = resolved.externalIdRaw || null;
     if (externalId) {
       const existing = await this.prisma.clash.findFirst({

@@ -157,3 +157,41 @@ describe('StorageService.delete', () => {
     expect(await fs.stat(path.join(uploadDir, 'clash-1'))).toBeTruthy();
   });
 });
+
+describe('StorageService.readStream', () => {
+  let uploadDir: string;
+
+  beforeEach(async () => {
+    uploadDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clashhub-storage-test-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(uploadDir, { recursive: true, force: true });
+  });
+
+  it('streams a file previously written by saveFromPath()', async () => {
+    const service = makeServiceWithUploadDir(uploadDir);
+    const sourcePath = await writeSourceFile('hello');
+    const { key } = await service.saveFromPath(sourcePath, 'clash-1', 'photo.png');
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of service.readStream(key)) chunks.push(chunk as Buffer);
+    expect(Buffer.concat(chunks).toString('utf-8')).toBe('hello');
+  });
+
+  // CommitImportDto.token is round-tripped through the client (unlike an
+  // attachment's storage key, which the service layer derives itself), so
+  // this is the one path where the guard blocks a real, reachable input —
+  // see ImportService.commit / readStoredFile.
+  it('rejects a key that traverses outside the upload root instead of opening it', () => {
+    const service = makeServiceWithUploadDir(uploadDir);
+
+    expect(() => service.readStream('../../etc/passwd')).toThrow('Kunci penyimpanan tidak valid.');
+  });
+
+  it('rejects an absolute path used as a key', () => {
+    const service = makeServiceWithUploadDir(uploadDir);
+
+    expect(() => service.readStream('/etc/passwd')).toThrow('Kunci penyimpanan tidak valid.');
+  });
+});

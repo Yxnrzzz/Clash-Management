@@ -68,6 +68,7 @@ export const toProject = (p: ApiProject): Project => ({
   id: p.id,
   nama: p.name,
   kode: p.code,
+  archivedAt: p.archivedAt,
 });
 
 export const toDiscipline = (d: ApiDiscipline): Discipline => ({

@@ -20,11 +20,19 @@ let refreshInFlight: Promise<ApiSession | null> | null = null;
 
 export class ApiError extends Error {
   readonly status: number;
+  /** Machine-readable error code from the response body, e.g.
+   * "PROJECT_ARCHIVED" — set only when the backend sends one. */
+  readonly code?: string;
+  /** Only set for 5xx responses (see AllExceptionsFilter) — the id to quote
+   * when reporting "I got an error", traceable back to a server log line. */
+  readonly requestId?: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code?: string, requestId?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
+    this.requestId = requestId;
   }
 }
 
@@ -36,15 +44,24 @@ export function setActiveProjectId(projectId: string | null) {
   activeProjectId = projectId;
 }
 
-async function readError(res: Response): Promise<string> {
+async function readError(res: Response): Promise<{ message: string; code?: string; requestId?: string }> {
+  // Appending the id directly to `message` (rather than requiring every one
+  // of the ~20 call sites that render `error.message` to separately check
+  // `error.requestId`) is what makes "quote this if it happens again" show
+  // up everywhere for free. Only for our own faults (5xx come with a
+  // requestId — see AllExceptionsFilter); a validation message doesn't need
+  // one.
+  const withId = (message: string, requestId?: string) =>
+    requestId ? `${message} (ID: ${requestId})` : message;
+
   try {
-    const body = (await res.json()) as { message?: string | string[] };
-    if (Array.isArray(body.message)) return body.message.join(", ");
-    if (body.message) return body.message;
+    const body = (await res.json()) as { message?: string | string[]; code?: string; requestId?: string };
+    const message = Array.isArray(body.message) ? body.message.join(", ") : body.message;
+    if (message) return { message: withId(message, body.requestId), code: body.code, requestId: body.requestId };
   } catch {
     // Non-JSON error body — fall through to the generic text.
   }
-  return `Permintaan gagal (${res.status})`;
+  return { message: withId(`Permintaan gagal (${res.status})`) };
 }
 
 function authHeaders(init?: RequestInit): HeadersInit {
@@ -63,14 +80,20 @@ async function send<T>(path: string, init?: RequestInit): Promise<T> {
   // Same-origin: next.config.ts rewrites /api/* to the NestJS server.
   const res = await fetch(`/api${path}`, { ...init, headers: authHeaders(init) });
 
-  if (!res.ok) throw new ApiError(res.status, await readError(res));
+  if (!res.ok) {
+    const { message, code, requestId } = await readError(res);
+    throw new ApiError(res.status, message, code, requestId);
+  }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
 
 async function sendBlob(path: string, init?: RequestInit): Promise<Blob> {
   const res = await fetch(`/api${path}`, { ...init, headers: authHeaders(init) });
-  if (!res.ok) throw new ApiError(res.status, await readError(res));
+  if (!res.ok) {
+    const { message, code, requestId } = await readError(res);
+    throw new ApiError(res.status, message, code, requestId);
+  }
   return res.blob();
 }
 

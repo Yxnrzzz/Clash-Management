@@ -12,8 +12,16 @@
 # Schedule it with host cron for a daily backup, e.g.:
 #   0 2 * * *  cd /path/to/WebApp/apps/api && ./scripts/backup-db.sh >> /var/log/clashhub-backup.log 2>&1
 #
-# (docker-compose.prod.yml also has a commented-out in-stack alternative
-# that runs this same pg_dump command on a loop — see "backup" service.)
+# docker-compose.prod.yml's own "backup" service already runs this same
+# pg_dump command on a loop by default (plus a tar of the uploads volume) —
+# use this script instead only if you want backups driven by host cron
+# rather than the in-stack container. Don't enable both against the same
+# BACKUP_DIR or you'll get duplicate dumps.
+#
+# This script backs up the DATABASE ONLY. Attachments live in the separate
+# clashhub-uploads volume — the "backup" service's tar of it is not
+# duplicated here; if you rely on this script instead of that service,
+# back up that volume separately too.
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-clashhub-postgres}"

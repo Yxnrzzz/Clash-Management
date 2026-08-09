@@ -3,6 +3,8 @@ import { Prisma } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from '../auth/auth.service';
+import { AuthUser } from '../auth/auth.types';
+import { CROSS_PROJECT_ROLES } from '../common/constants/project-roles';
 import { toUserView, UserView } from '../common/user.view';
 import { CreateUserDto, UpdateUserDto } from './dto/user.dto';
 
@@ -21,8 +23,34 @@ export interface PasswordReset {
 export class UsersService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(): Promise<UserView[]> {
-    const users = await this.prisma.user.findMany({ orderBy: { createdAt: 'asc' } });
+  /**
+   * ADMIN/MANAGEMENT/COORDINATOR already see every project (CROSS_PROJECT_ROLES)
+   * and the Admin user-management page needs the full directory, so they get
+   * it here too. An Engineer is confined to their own projects everywhere
+   * else in the app — this used to return the entire org's directory
+   * (name/email/role) to any signed-in user regardless of role, which is
+   * exactly the kind of target list a credential-stuffing attempt wants.
+   * Scoped to "shares at least one project with the requester" rather than
+   * the caller's single active project, since this list feeds the Register's
+   * assignee picker before an active project may even be resolved and an
+   * Engineer can belong to more than one.
+   */
+  async findAll(requester: AuthUser): Promise<UserView[]> {
+    if (CROSS_PROJECT_ROLES.includes(requester.role)) {
+      const users = await this.prisma.user.findMany({ orderBy: { createdAt: 'asc' } });
+      return users.map(toUserView);
+    }
+
+    const memberships = await this.prisma.projectMember.findMany({
+      where: { userId: requester.id },
+      select: { projectId: true },
+    });
+    if (memberships.length === 0) return [];
+
+    const users = await this.prisma.user.findMany({
+      where: { projectMemberships: { some: { projectId: { in: memberships.map((m) => m.projectId) } } } },
+      orderBy: { createdAt: 'asc' },
+    });
     return users.map(toUserView);
   }
 

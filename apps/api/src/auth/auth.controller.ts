@@ -5,6 +5,7 @@ import ms from 'ms';
 import type { Request, Response } from 'express';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { SkipProjectScope } from '../common/decorators/skip-project-scope.decorator';
 import { toUserView } from '../common/user.view';
 import { AuthService, AuthTokens } from './auth.service';
 import { AuthUser } from './auth.types';
@@ -13,6 +14,11 @@ import { LoginDto } from './dto/login.dto';
 
 const REFRESH_COOKIE = 'clashhub_refresh';
 
+// A new account starts with no project membership at all (see
+// UsersService.create), and change-password is mandatory before one can be
+// granted — so this controller cannot require X-Project-Id the way
+// project-scoped controllers do. Global, like UsersController/ProjectsController.
+@SkipProjectScope()
 @Controller('auth')
 export class AuthController {
   constructor(

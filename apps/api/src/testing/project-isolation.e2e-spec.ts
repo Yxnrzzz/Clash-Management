@@ -42,8 +42,9 @@ import { NotificationsProcessor } from '../notifications/notifications.processor
 
 // --- Fixtures: two isolated projects ----------------------------------------
 
-const PROJECT_A = { id: 'proj-a', name: 'Project A', code: 'AAA' };
-const PROJECT_B = { id: 'proj-b', name: 'Project B', code: 'BBB' };
+const PROJECT_A = { id: 'proj-a', name: 'Project A', code: 'AAA', archivedAt: null as Date | null };
+const PROJECT_B = { id: 'proj-b', name: 'Project B', code: 'BBB', archivedAt: null as Date | null };
+const PROJECT_C = { id: 'proj-c', name: 'Project C', code: 'CCC', archivedAt: new Date('2026-08-01') };
 
 // BulkUpdateClashDto validates `ids` with @IsUUID — a human-readable id like
 // "clash-a" would 400 before the request ever reaches the service, so the
@@ -223,7 +224,7 @@ describe('Multi-project isolation (IDOR)', () => {
     const fakePrisma = {
       project: {
         findUnique: jest.fn(({ where: { id } }: { where: { id: string } }) =>
-          Promise.resolve([PROJECT_A, PROJECT_B].find((p) => p.id === id) ?? null),
+          Promise.resolve([PROJECT_A, PROJECT_B, PROJECT_C].find((p) => p.id === id) ?? null),
         ),
         findFirst: jest.fn(() => Promise.resolve(PROJECT_A)),
         findMany: jest.fn(() => Promise.resolve([PROJECT_A, PROJECT_B])),
@@ -403,5 +404,13 @@ describe('Multi-project isolation (IDOR)', () => {
       .get('/clashes')
       .set(authHeaders(ENGINEER_A, 'proj-does-not-exist'))
       .expect(404);
+  });
+
+  it('rejects an archived X-Project-Id with 403 PROJECT_ARCHIVED, even for a cross-project role', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/clashes')
+      .set(authHeaders(ADMIN, PROJECT_C.id))
+      .expect(403);
+    expect(res.body.code).toBe('PROJECT_ARCHIVED');
   });
 });

@@ -1,7 +1,17 @@
 # EPS Workspace — Handoff Progress
 
-**Tanggal:** 6 Agustus 2026 (update ke-15)
-**Status:** Frontend selesai. **Sprint 0-9 backend selesai, Sprint 11 sebagian besar selesai** (Sprint 10/AI opsional masih belum, sengaja ditunda — lihat §7/§12), produk sekarang bernama **EPS Workspace** (rebrand dari "ClashHub", lihat update ke-13), dan **benar-benar multi-project** (di luar 12 sprint asli — permintaan ad-hoc, lihat update ke-12 di bawah): auth, RBAC (termasuk **assignee kini dibatasi Engineer aktif saja**, lihat update ke-13), CRUD user/proyek/master-data, clash/komentar/audit log, lampiran (**sekarang bisa lewat signed URL berumur pendek, lihat update ke-15**), notifikasi email+WhatsApp, **impor massal CSV/XML async + template master data antar proyek**, **hardening keamanan + observability + uji beban 10.000 clash terukur nyata** (rate limiting **sekarang per-user, bukan per-IP**, lihat update ke-15), dan **otorisasi per-proyek yang ditegakkan server-side** (bukan lagi "single-project, semua user otomatis anggota") semuanya berjalan di NestJS + PostgreSQL + Redis (+ disk lokal untuk file) dengan RBAC ditegakkan server-side. **Tidak ada lagi apa pun yang client-only** — `localStorage` sudah pensiun total.
+**Tanggal:** 7 Agustus 2026 (update ke-16)
+**Status:** Frontend selesai. **Sprint 0-9 backend selesai, Sprint 11 sebagian besar selesai** (Sprint 10/AI opsional masih belum, sengaja ditunda — lihat §7/§12), produk sekarang bernama **EPS Workspace** (rebrand dari "ClashHub", lihat update ke-13), dan **benar-benar multi-project** (di luar 12 sprint asli — permintaan ad-hoc, lihat update ke-12 di bawah): auth, RBAC (termasuk **assignee kini dibatasi Engineer aktif saja**, lihat update ke-13; **Management sekarang bisa berkomentar**, lihat update ke-16), CRUD user/proyek/master-data, clash/komentar/audit log, lampiran (**sekarang bisa lewat signed URL berumur pendek**, lihat update ke-15; **clash sekarang bisa di-soft-delete Admin, lampiran bisa dikelola penuh dari halaman detail dengan pratinjau zoom/pan, dan bisa diberi markup vektor (kotak/panah/bebas/teks) tanpa menyentuh file asli**, lihat update ke-16), notifikasi email+WhatsApp, **impor massal CSV/XML async + template master data antar proyek**, **hardening keamanan + observability + uji beban 10.000 clash terukur nyata** (rate limiting **sekarang per-user, bukan per-IP**, lihat update ke-15), dan **otorisasi per-proyek yang ditegakkan server-side** (bukan lagi "single-project, semua user otomatis anggota") semuanya berjalan di NestJS + PostgreSQL + Redis (+ disk lokal untuk file) dengan RBAC ditegakkan server-side. **Tidak ada lagi apa pun yang client-only** — `localStorage` sudah pensiun total.
+
+**Update ke-16 (siklus hidup clash & lampiran, di luar Sprint Plan asli — permintaan ad-hoc pasca update ke-15):** Empat fitur berurutan, masing-masing dirilis & diverifikasi terpisah, ditutup dengan sesi perbaikan bug pasca-review user. Ringkasan penuh ada di §5 "Soft-delete clash, kelola lampiran, pratinjau & markup vektor" — di sini cuma daftar isi.
+(1) **Soft-delete clash** (Admin-only): `Clash.deletedAt` baru + fragmen where `NOT_DELETED` (`apps/api/src/clashes/clash-scope.ts`) di-spread ke semua jalur baca (list/metrics/bulkUpdate/detail, overdue scanner, notification processor) — **dengan dua pengecualian sengaja** (hitung sequence `uniqueCode` dan dedup `externalId` import) yang didokumentasikan di kode supaya tidak "diperbaiki" keliru di sesi depan. `DELETE /clashes/:id` + `POST /clashes/:id/restore`.
+(2) **Kelola lampiran dari halaman detail** — sebelumnya cuma bisa ditambah saat clash dibuat. Sekarang upload/hapus langsung dari tab Lampiran, hapus dibatasi ke pengunggah sendiri (atau Coordinator/Admin), plus audit log `attachment_added`/`attachment_deleted` dan `StorageService.delete()` baru (proteksi path traversal, toleran file hilang).
+(3) **Modal pratinjau lampiran** — zoom/pan, navigasi panah keyboard, dan refresh signed-URL proaktif 1 menit sebelum kedaluwarsa (TTL 5 menit sengaja **tidak** diperpanjang — signed URL tidak bisa dicabut, jadi jendela lebih panjang cuma menambah paparan tanpa manfaat UX).
+(4) **Markup vektor** — model `Annotation` baru (geometri dinormalisasi `[0,1]` terhadap kotak intrinsik halaman, **file asli tidak pernah disentuh**), overlay SVG (kotak/panah/bebas/teks), dibagikan ke seluruh anggota proyek, edit/hapus dibatasi ke pembuat atau Coordinator/Admin. PDF dirender lewat `pdfjs-dist` (worker di-copy ke `public/` lewat script `prebuild`, bukan diresolve bundler). "Unduh dengan markup" meratakan ke PNG sepenuhnya di client.
+**Juga:** Management sekarang bisa berkomentar (`canComment()` dan pesan baca-saja-nya dihapus total — komentar itu diskusi, bukan edit yang mengubah state).
+**Dua bug ditemukan lewat verifikasi browser pasca-implementasi awal** (bukan lewat test otomatis — keduanya lolos test karena event sintetis tidak sepenuhnya meniru perilaku browser nyata): `useElementBox` memicu infinite loop (`setState` tanpa dependency array yang benar), dan **markup teks sama sekali tidak bisa diketik dengan mouse asli** — `mousedown`'s default action memindah fokus ke `<body>` *setelah* React memasang input `autoFocus`, jadi input langsung ter-blur di tick yang sama. Kedua bug + pelajarannya didokumentasikan lengkap di §8 (sesi update ke-16) dan §9.28-30 — **wajib dibaca sebelum menyentuh `AnnotationLayer.tsx`/`AttachmentPreviewModal.tsx` lagi**.
+
+**Verifikasi otomatis update ke-16**: backend naik dari 147→**190** test (17→18 suite: +annotations service, +storage delete, +clashes soft-delete/attachment delete, +overdue-scanner/notifications-processor filter); frontend naik dari 57→**120** test (5→10 file: +DeleteClashDialog, +AttachmentPanel, +AttachmentPreviewModal, +AnnotationLayer, +annotations.ts, +lookup diperluas). `tsc --noEmit` bersih (1 error bawaan tak terkait di `AppShell.test.tsx`), lint bersih di kedua sisi, `next build` hijau (memvalidasi jalur worker `pdfjs-dist`+Turbopack — risiko terbesar tahap markup). Diverifikasi live di browser nyata untuk **semua** empat tahap dan kedua bug fix, dengan mouse & keyboard sungguhan (bukan `dispatchEvent`) setelah ketahuan itulah yang menyembunyikan bug teks — lihat §5 untuk detail lengkap per tahap.
 
 **Update ke-15 (utang test & hardening kecil, di luar Sprint Plan asli — PR #12 di-merge ke `main` di awal sesi ini):** Enam langkah independen, semuanya diverifikasi test otomatis dan sebagian besar juga live/end-to-end.
 (1) **Test untuk endpoint membership proyek** (`GET/POST/DELETE /projects/:projectId/members`) — sebelumnya cuma diverifikasi manual (update ke-12), sekarang 11 unit test baru di `projects.service.spec.ts` (404/409/mapping/urutan) + `apps/api/src/testing/project-members.e2e-spec.ts` baru (8 test HTTP penuh, pola sama dengan `project-isolation.e2e-spec.ts`: Prisma palsu in-memory + `TestAuthGuard`, membuktikan `@Roles(Role.ADMIN)` benar-benar satu-satunya peran yang lolos — termasuk Coordinator, meski dia salah satu `CROSS_PROJECT_ROLES` di tempat lain, tetap `403` di sini — dan `@SkipProjectScope()` di controller masih berlaku, Admin lolos tanpa header `X-Project-Id`).
@@ -87,13 +97,39 @@ src/
 │   │   │                       "anggota" cuma hitung semua user aktif; lihat §5)
 │   │   └── master-data/page.tsx  tab Disiplin/Zona/Prioritas/Status
 │   └── clashes/
-│       ├── new/page.tsx        form input + upload lampiran SUNGGUHAN (File asli, object URL)
-│       └── [id]/page.tsx       detail, triase, komentar, audit trail, pratinjau lampiran
+│       ├── new/page.tsx        form input + upload lampiran SUNGGUHAN (File asli, object URL);
+│       │                       konstanta MAX_FILE_MB/MAX_FILES/validateAttachmentFile diekstrak
+│       │                       ke lib/attachments.ts sejak update ke-16 (dipakai bareng
+│       │                       AttachmentPanel), sisanya (dropzone staged-file) tetap di sini
+│       │                       karena siklus hidupnya beda (upload SETELAH clash dibuat)
+│       └── [id]/page.tsx       detail, triase, komentar (SEMUA peran termasuk Management sejak
+│                                update ke-16 — canComment() dihapus), audit trail, tab Lampiran
+│                                (delegasi ke AttachmentPanel), tombol Hapus clash di "Zona
+│                                berbahaya" (Admin-only, update ke-16)
 ├── components/
 │   ├── AppShell.tsx             sidebar + nav (nav & menu Admin difilter per peran) + project
 │   │                             switcher SUNGGUHAN (update ke-12 — sebelumnya cuma teks nama
 │   │                             proyek, tidak pernah dropdown fungsional)
 │   ├── Badge.tsx
+│   ├── clashes/                 BARU (update ke-16) — semua UI siklus-hidup clash/lampiran/markup
+│   │   ├── DeleteClashDialog.tsx      konfirmasi hapus, wajib ketik ulang kodeUnik
+│   │   ├── AttachmentPanel.tsx        tab Lampiran penuh: dropzone upload + kartu lampiran +
+│   │   │                              tombol Hapus (per-kartu, hanya utk pengunggah sendiri
+│   │   │                              atau Coordinator/Admin) + trigger buka AttachmentPreviewModal
+│   │   ├── AttachmentPreviewModal.tsx modal pratinjau: zoom/pan (transform di wrapper
+│   │   │                              `contentRef`, BUKAN di <img>/<canvas> langsung — lihat
+│   │   │                              §5), navigasi panah, refresh signed-URL proaktif, host
+│   │   │                              AnnotationLayer + AnnotationToolbar + PdfPageCanvas,
+│   │   │                              tombol "Unduh dengan markup" (flatten client-side)
+│   │   ├── AnnotationLayer.tsx        overlay SVG: render shape per anotasi, draw draft,
+│   │   │                              handleMouseDown WAJIB preventDefault (lihat §8/§9.29 —
+│   │   │                              tanpa ini input teks tidak bisa diketik sama sekali)
+│   │   ├── AnnotationToolbar.tsx      tool select/pan/rect/arrow/freehand/text + color picker;
+│   │   │                              select/pan SELALU tampil (termasuk Management), tool
+│   │   │                              menggambar+warna cuma kalau canDraw
+│   │   └── PdfPageCanvas.tsx          render 1 halaman PDF ke <canvas> via pdfjs-dist, HANYA
+│   │                                  dimuat lewat next/dynamic({ ssr:false }) — jangan pernah
+│   │                                  di-import statis (lihat §5/§9.28)
 │   ├── register/
 │   │   ├── RegisterView.tsx     filter/sort/pagination server-side (fetch /clashes per
 │   │   │                        perubahan filter, debounced); export fetch semua-cocok on-demand
@@ -105,27 +141,52 @@ src/
 │       └── viz-tokens.ts
 └── lib/
     ├── api/                      LAPISAN BARU (Sprint 1)
-    │   ├── client.ts             apiFetch/apiGet/apiPost/apiPatch, login, logout,
+    │   ├── client.ts             apiFetch/apiGet/apiPost/apiPatch/apiDelete, login, logout,
     │   │                         restoreSession. Access token disimpan DI MEMORI
     │   │                         (bukan localStorage). Retry sekali lewat /auth/refresh saat 401.
-    │   ├── mappers.ts            SATU-SATUNYA tempat terjemahan Inggris ↔ Indonesia
-    │   └── types.ts              bentuk respons API mentah (name/role/weight/sequence)
-    ├── types.ts                 tipe domain — TIDAK BERUBAH sejak Sprint 1
+    │   ├── mappers.ts            SATU-SATUNYA tempat terjemahan Inggris ↔ Indonesia — +
+    │   │                         toAnnotation/annotationPayload sejak update ke-16
+    │   └── types.ts              bentuk respons API mentah (name/role/weight/sequence) — +
+    │                             ApiAnnotation, +ApiClash.deletedAt sejak update ke-16
+    ├── types.ts                 tipe domain — +Clash.deletedAt sejak update ke-16 (sisanya
+    │                             tidak berubah sejak Sprint 1)
+    ├── annotations.ts            BARU (update ke-16) — modul geometri MURNI (tanpa React/API):
+    │                             toPixels/fromPixels (normalisasi [0,1] ↔ px pada PageBox aktif,
+    │                             dipakai overlay SVG DAN flatten canvas supaya keduanya tidak
+    │                             pernah berbeda), strokeWidthPixels (skala berdasar LEBAR saja,
+    │                             biar garis tidak melar di halaman non-persegi),
+    │                             simplifyFreehand (Ramer–Douglas–Peucker sebelum kirim ke server),
+    │                             arrowHeadPoints (dipakai bareng oleh AnnotationLayer & canvas
+    │                             flattener biar bentuk panahnya identik)
+    ├── use-signed-url.ts         BARU (update ke-16) — hook fetch+refresh proaktif signed URL
+    │                             1 lampiran, dipakai AttachmentPreviewModal & (tidak langsung)
+    │                             kartu thumbnail di AttachmentPanel. Retry dari <img onError>
+    │                             dibatasi SEKALI PER attachmentId (bukan reset tiap fetch
+    │                             sukses) — lihat §8 16a kalau lupa kenapa itu penting
+    ├── attachments.ts            BARU (update ke-16) — MAX_FILE_MB/MAX_FILES/ACCEPTED_TYPES/
+    │                             validateAttachmentFile diekstrak dari clashes/new/page.tsx,
+    │                             dipakai bareng AttachmentPanel
     ├── dashboard-metrics.ts      computeMetrics() TIDAK DIPAKAI DashboardView lagi (server yang
     │                             hitung sejak update ke-5) — sengaja dipertahankan sbg fungsi
     │                             murni untuk unit test (lihat §12); resolveRange/RANGE_PRESETS
     │                             masih dipakai untuk UI range picker & WEEK_LABEL diekspor utk mappers.ts
     ├── data-context.tsx          master data dari API; clashesById (BUKAN array, lihat §5) sbg
-    │                             cache kecil on-demand utk clash; hanya lampiran & preferensi
-    │                             notifikasi yang masih localStorage (lihat §5). Sejak update
-    │                             ke-12: `projects: Project[]` + `setActiveProject()` (proyek
-    │                             AKTIF dipersist di localStorage key `clashhub:activeProjectId`
-    │                             — ini BEDA dari key `clashhub-data-v5` di atas, jangan disamakan)
+    │                             cache kecil on-demand utk clash; hanya preferensi notifikasi
+    │                             yang masih dibaca via API di sini (attachments SUDAH server-side
+    │                             sejak update ke-6, anotasi SENGAJA tidak masuk context sama
+    │                             sekali — lihat §5 update ke-16). Sejak update ke-12: `projects:
+    │                             Project[]` + `setActiveProject()`. Sejak update ke-16:
+    │                             `deleteClash`, `uploadAttachments`, `deleteAttachment` baru —
+    │                             anotasi TIDAK di sini (state lokal modal, lihat §5)
     ├── auth-context.tsx          auth ASLI — login/refresh/logout ke API
     ├── use-master-data.ts        hook lookup (disciplineById dst.) terikat ke array live
     ├── use-require-auth.ts       guard route (login wajib)
     ├── use-require-admin.ts      guard route (Admin-only, redirect ke /register)
-    ├── lookup.ts                 helper murni: format tanggal/bytes, canEditClash, canComment
+    ├── lookup.ts                 helper murni: format tanggal/bytes, canEditClash,
+    │                             canDeleteClash/canUploadAttachment/canDeleteAttachment/
+    │                             canDrawAnnotation/canEditAnnotation (semua BARU update ke-16).
+    │                             `canComment` DIHAPUS update ke-16 — semua peran boleh komentar,
+    │                             tidak ada lagi gating sama sekali (jangan ditambah balik)
     ├── dashboard-metrics.ts       agregasi KPI/tren/sebaran (nerima master data sbg parameter)
     ├── export.ts                  exportClashesToExcel, exportClashesToPdf
     └── csv.ts                     parser CSV minimal untuk wizard import
@@ -146,26 +207,67 @@ apps/api/src/
 ├── users/  ·  projects/  ·  master-data/     controller + service + dto — projects/ sekarang juga
 │                             endpoint membership (`GET/POST/DELETE /projects/:projectId/members`,
 │                             Admin-only, update ke-12)
-├── clashes/                      clash + komentar + audit log
-│   ├── clashes.controller.ts     GET /clashes (filter/sort/pagination), GET /clashes/metrics
-│   │                             (HARUS didaftarkan sebelum GET /:id — lihat komentar di file),
-│   │                             GET /:id, POST, PATCH /:id, POST /bulk, POST /:id/comments,
-│   │                             POST /:id/attachments, GET /:clashId/attachments/:id/download —
-│   │                             semuanya sekarang menerima `@ActiveProject() projectId` (update ke-12)
+├── clashes/                      clash + komentar + audit log + lampiran + anotasi (markup, BARU
+│   │                             update ke-16 — modul terbesar di backend sekarang)
+│   ├── clashes.controller.ts     GET /clashes (+ `deleted=1` Admin-only utk lihat clash
+│   │                             terhapus, update ke-16), GET /clashes/metrics (HARUS
+│   │                             didaftarkan sebelum GET /:id — lihat komentar di file),
+│   │                             GET /:id, POST, PATCH /:id, **DELETE /:id + POST
+│   │                             /:id/restore (BARU update ke-16, Admin-only)**, POST /bulk,
+│   │                             POST /:id/comments (sekarang MANAGEMENT juga boleh, update
+│   │                             ke-16), POST /:id/attachments, GET /:clashId/attachments/:id/
+│   │                             download, GET .../signed-url, GET .../signed (@Public,
+│   │                             update ke-15), **DELETE /:clashId/attachments/:attachmentId
+│   │                             (BARU update ke-16)** — semuanya menerima `@ActiveProject()
+│   │                             projectId` (update ke-12)
 │   ├── clashes.service.ts        RBAC per-field, generator uniqueCode, audit log server-side,
-│   │                             list() (where/orderBy/skip/take Prisma), metrics() (port dari
-│   │                             computeMetrics() frontend — keduanya harus tetap sinkron),
+│   │                             list() (where/orderBy/skip/take Prisma, sekarang selalu
+│   │                             di-spread `NOT_DELETED` kecuali `deleted=1`), metrics() (port
+│   │                             dari computeMetrics() frontend — keduanya harus tetap sinkron),
 │   │                             applyPatch() memanggil NotificationsService setelah commit
 │   │                             (assigned/status_change) — lihat §5 "Notifikasi async".
-│   │                             `assertClashInProject()` (update ke-12) menggantikan semua akses
-│   │                             `prisma.clash.findUnique` telanjang — lihat §5
+│   │                             `assertClashInProject()` (update ke-12, SEKARANG `findFirst`
+│   │                             + `NOT_DELETED` bukan `findUnique` — update ke-16) menggantikan
+│   │                             semua akses `prisma.clash.findUnique` telanjang — lihat §5.
+│   │                             `softDelete()`/`restore()` baru (update ke-16). `deleteAttachment()`
+│   │                             baru (update ke-16) — hard-delete baris + `tx.annotation.
+│   │                             deleteMany` + unlink disk fire-and-forget. `assertAttachmentInClash()`
+│   │                             sekarang `public` (dulu `private`) supaya `AnnotationsService`
+│   │                             bisa pakai ulang scoping yang sama (update ke-16)
+│   ├── clash-scope.ts             BARU (update ke-16) — SATU-SATUNYA definisi `NOT_DELETED`
+│   │                             (`{ deletedAt: null }`), file terpisah (bukan di dalam service)
+│   │                             supaya `overdue-scanner.service.ts`/`notifications.processor.ts`
+│   │                             bisa impor tanpa circular dependency ke ClashesModule
+│   ├── annotations.controller.ts  BARU (update ke-16) — nested di bawah
+│   │                             `:clashId/attachments/:attachmentId/annotations`, GET tanpa
+│   │                             `@Roles()` (markup dibagikan ke semua peran termasuk
+│   │                             Management), POST/PATCH/DELETE `@Roles(ENGINEER, COORDINATOR,
+│   │                             ADMIN)`
+│   ├── annotations.service.ts     BARU (update ke-16) — `parseGeometry()` memvalidasi tiap
+│   │                             angka finite & di [0,1] per-kind (RECT/ARROW/FREEHAND/TEXT),
+│   │                             cap 2000 titik freehand + 64KB payload — validasi INI wajib
+│   │                             di service karena discriminated union di atas kolom `Json`
+│   │                             tidak bisa diekspresikan lewat class-validator.
+│   │                             `assertOwnerOrCoordinator()` — pembuat sendiri atau
+│   │                             Coordinator/Admin, pola identik `assertCanDeleteAttachment()`
+│   │                             di `clashes.service.ts`
+│   ├── dto/annotation.dto.ts      BARU (update ke-16) — `geometry` cuma divalidasi `@IsObject()`
+│   │                             di level DTO (isi per-kind divalidasi di service, lihat atas)
 │   └── clashes.service.spec.ts   test: RBAC, transisi status, closedAt, audit, uniqueCode,
-│                                  list()/metrics(), attachment, +isolasi proyek (update ke-12)
+│                                  list()/metrics(), attachment, +isolasi proyek (update ke-12),
+│                                  +soft-delete/restore/deleteAttachment (update ke-16) —
+│                                  ditambah `annotations.service.spec.ts` baru terpisah
 ├── testing/                      BARU (update ke-12): project-isolation.e2e-spec.ts — satu-satunya
 │                             test di repo ini yang lewat HTTP sungguhan (supertest + Nest
-│                             TestingModule, Prisma tetap di-mock), lihat §5
+│                             TestingModule, Prisma tetap di-mock), lihat §5. Mock `clash`-nya
+│                             ditambah `findFirst` sejak update ke-16 (`assertClashInProject`
+│                             pindah dari `findUnique`)
 ├── storage/                      StorageService — file lampiran ke disk lokal (S3/R2-ready),
-│                                  lihat §5 "Lampiran: object storage lokal"
+│                                  lihat §5 "Lampiran: object storage lokal". `delete(key)` baru
+│                                  (update ke-16) — proteksi path traversal via `path.resolve`
+│                                  + cek prefix, `force:true` (file hilang = no-op), TANPA
+│                                  `recursive:true` (key yang salah arah ke direktori harus
+│                                  gagal, bukan menghapus seluruh folder clash)
 ├── notifications/                BullMQ producer (NotificationsService) + consumer
 │   │                             (NotificationsProcessor), EmailService (nodemailer + MailHog),
 │   │                             WhatsAppService (WhatsAppProvider interface + mock),
@@ -349,20 +451,70 @@ Ini **deny-by-default** — beda filosofi dari `ProjectMemberGuard` lama yang `r
 
 **Diverifikasi live di browser** (bukan cuma test otomatis) — lihat §9 gotcha baru soal bug yang ketemu justru dari langkah ini: login Admin → switch proyek MCA↔GSB di sidebar → Register/disiplin/zona berganti sesuai (91 vs 12 clash); tambah/hapus anggota proyek di `/admin/projects` → daftar berubah sungguhan lewat API; login Engineer (`u-eng`, cuma anggota MCA) → navigasi langsung ke URL clash milik GSB → **"Clash tidak ditemukan"** (404 dari network tab, bukan cuma UI yang menyembunyikan), project switcher otomatis hilang (karena `projects.length <= 1` untuknya).
 
+### Soft-delete clash, kelola lampiran, pratinjau & markup vektor (update ke-16)
+
+Permintaan ad-hoc (di luar `ClashHub_Sprint_Plan.md`), dikerjakan sebagai 4 tahap berurutan — tiap tahap dirilis & diverifikasi live di browser sendiri-sendiri sebelum lanjut ke tahap berikutnya, ditutup satu sesi perbaikan bug setelah user mencoba fitur markup dan dua kali melaporkan "masih tidak bisa" (lihat penutup subbab ini — **wajib dibaca**, itu bagian paling berharga dari update ini).
+
+**Tahap 1 — Soft-delete clash (Admin-only).** `Clash.deletedAt DateTime?` baru (migrasi `20260807131750_add_clash_soft_delete`) — **bukan** `isActive` boolean seperti `Discipline`/`Zone`/`Priority` (§5 "Soft-delete, bukan hard-delete") karena semantiknya beda: `isActive` berarti "tidak bisa dipilih lagi tapi tetap kelihatan di riwayat" (disiplin nonaktif tetap muncul di filter chip Register), sedangkan ini berarti "hilang dari mana-mana" sampai di-restore. `uniqueCode` **tidak pernah dibebaskan** saat dihapus — restore harus lossless dan kode itu muncul di export/notifikasi.
+
+Fragmen where `NOT_DELETED = { deletedAt: null }` (file terpisah `clashes/clash-scope.ts`, bukan konstanta di dalam service, supaya modul lain bisa impor tanpa circular dependency ke `ClashesModule`) di-spread ke **semua** jalur baca: `list()`, `metrics()`, `bulkUpdate()`, `assertClashInProject()` (sekarang `findFirst` + opsi `includeDeleted` — bukan lagi `findUnique` polos), `overdue-scanner.service.ts`, `notifications.processor.ts` (guard job yang sudah di-enqueue tapi clash-nya keburu dihapus). **Dua pengecualian sengaja, didokumentasikan di kode supaya tidak "diperbaiki" keliru nanti**:
+- hitung sequence `uniqueCode` di `createClashRecord()` — kalau difilter, baris terhapus (yang tetap memegang kodenya) akan bikin nomor urut baru bentrok dengan kode yang sudah dipakai, retry `P2002` menghitung ulang angka yang sama persis, dan pembuatan clash gagal total setelah 2 percobaan;
+- dedup `externalId` di `import.processor.ts` — mencerminkan constraint `@@unique([projectId, externalId])` yang memang tidak sadar soft-delete; membiarkannya apa adanya menjaga jalur "skipped" tetap bersih dan re-import tidak diam-diam menghidupkan kembali baris yang sengaja dihapus.
+
+Endpoint `DELETE /clashes/:id` + `POST /clashes/:id/restore` (keduanya Admin-only, dalam transaksi bareng baris `AuditLog` action `deleted`/`restored`). `GET /clashes?deleted=1` (Admin-only, ditolak 403 utk peran lain) untuk lihat clash terhapus — belum ada UI "keranjang sampah" di frontend, cuma endpointnya yang tersedia (lihat §12). Frontend: tombol "Hapus clash" di panel "Zona berbahaya" (aside merah, hanya tampil kalau `canDeleteClash`), `DeleteClashDialog` wajib ketik ulang `kodeUnik` persis sebelum tombol konfirmasi aktif — pola sama dengan konfirmasi bulk-update yang sudah ada.
+
+**Diverifikasi live**: hapus clash → hilang dari Register/Dashboard/My Clashes/export, buka URL detail langsung → "Clash tidak ditemukan"; **buat clash baru di disiplin yang sama persis setelah menghapus** → kode lanjut normal (`JTB-ARS-0007`, bukan bentrok dengan `JTB-ARS-0006` yang baru dihapus) — ini yang membuktikan pengecualian sequence count di atas benar-benar perlu, bukan cuma teori.
+
+**Tahap 2 — Kelola lampiran dari halaman detail.** Sebelumnya lampiran cuma bisa ditambah saat form `clashes/new` disubmit — halaman detail sama sekali tidak punya kontrol upload/hapus, jadi file salah unggah permanen. Sekarang tab Lampiran (`AttachmentPanel.tsx`, komponen baru yang memiliki seluruh isi tab — dropzone + kartu + tombol Hapus per kartu) bisa upload kapan saja (`ENGINEER`/`COORDINATOR`/`ADMIN`, **ke clash siapa pun di proyeknya, bukan cuma clash sendiri** — sengaja TIDAK dibatasi `assertCanEdit()`, beda dari mengedit field clash itu sendiri) dan hapus (**hanya pengunggah sendiri, atau Coordinator/Admin** — helper baru `assertCanDeleteAttachment()`, beda aturan dari `assertCanEdit()` karena kuncinya `uploadedById`, bukan assignee/reporter).
+
+`StorageService.delete(key)` baru — `path.resolve` + cek prefix root utk proteksi path traversal (walau key **tidak pernah** datang dari client, cuma dari `attachment.fileUrl` yang sudah divalidasi `assertAttachmentInClash()` — ini pertahanan lapis kedua, bukan kontrol akses utama), `force:true` (file sudah hilang = no-op, bukan error), sengaja **tanpa** `recursive:true` (kalau key entah bagaimana menunjuk direktori, harus gagal — bukan menghapus seluruh folder `<clashId>/`). Baris `Attachment` **di-hard-delete** (beda dari `Clash` yang soft-delete) — satu-satunya nilai historisnya cuma nama file, dan itu sudah terekam di `AuditLog`; unlink file di disk fire-and-forget **setelah** transaksi commit (pola sama seperti `publishNotifications()`) supaya kegagalan I/O tidak pernah membuat baris DB hilang tapi request-nya 500. Audit log baru: `attachment_added`/`attachment_deleted` (field `attachment`, `oldValue`/`newValue` = nama file) — `auditText()` di `clashes/[id]/page.tsx` dapat cabang baru untuk keduanya, **plus fallback defensif** `if (!entry.field) return ...` sebelum template diff generik (lihat §8 z-series update ke-15 soal action `"imported"` yang dulu lolos type-check tapi salah runtime — pola yang sama persis bisa terulang untuk action baru mana pun kalau fallback ini tidak ada).
+
+**Diverifikasi live**: Engineer unggah ke clash milik Rhendy (bukan miliknya) → sukses; hapus lampiran sendiri → sukses, baris `AuditLog` muncul di tab Riwayat dengan kalimat Indonesia yang benar; tombol Hapus tidak tampil sama sekali untuk lampiran unggahan Engineer lain (dicoba dengan 2 lampiran, masing-masing pengunggah beda).
+
+**Tahap 3 — Modal pratinjau lampiran (`AttachmentPreviewModal.tsx`).** Sebelumnya gambar dirender sebagai thumbnail 40×40px + link "Unduh" — untuk sekadar melihat screenshot, harus diunduh ke disk dulu. Modal baru: zoom (scroll wheel + tombol −/Reset/+, dipasang manual via `addEventListener({passive:false})` karena `onWheel` React itu passive dan `preventDefault()`-nya no-op di situ), pan (drag saat scale>1), navigasi panah kiri/kanan antar lampiran, Escape/klik-backdrop utk tutup, fokus dikembalikan ke elemen semula saat unmount.
+
+**TTL signed URL (5 menit, dari update ke-15) sengaja TIDAK diperpanjang** — URL itu tidak bisa dicabut sekali terbit, jadi jendela lebih panjang cuma menambah paparan tanpa manfaat UX. Sebagai gantinya: `use-signed-url.ts` (hook baru) refresh **proaktif** 1 menit sebelum kedaluwarsa (dijadwalkan lewat `setTimeout` dari `expiresAt` yang dikembalikan server, bukan interval tetap), plus retry sekali dari `<img onError>` — **retry dibatasi per-`attachmentId`, bukan counter yang di-reset tiap fetch sukses** (lihat bug 16a di §8, ini persis penyebab infinite-request-loop yang ditemukan pasca-implementasi).
+
+**Tahap 4 — Markup vektor.** Model `Annotation` baru (migrasi `20260807135624_add_annotations`, enum `AnnotationKind = RECT|ARROW|FREEHAND|TEXT`) — geometri disimpan **dinormalisasi ke [0,1]** relatif kotak intrinsik halaman (bukan piksel mentah), supaya satu mapping tetap presisi di zoom/viewport berapa pun; `strokeWidth` dinormalisasi cuma terhadap LEBAR (bukan lebar & tinggi terpisah) supaya garis tidak melar di halaman non-persegi. Modul murni `src/lib/annotations.ts` (`toPixels`/`fromPixels`/`strokeWidthPixels`/`arrowHeadPoints`/`simplifyFreehand`) dipakai bareng oleh overlay SVG **dan** flattener canvas (tombol "Unduh dengan markup") — supaya keduanya tidak mungkin menggambar bentuk yang beda.
+
+**Overlay SVG, bukan `<canvas>`** — hit-testing/seleksi gratis lewat DOM node (klik langsung pada `<rect>`/`<path>`/`<text>`), dan tetap bisa di-assert Testing Library (canvas buram total di jsdom, tidak ada `getContext`). Wrapper transform pan/zoom dari Tahap 3 (`contentRef`, `inline-block`, transform diterapkan DI SITU bukan langsung di `<img>`/`<canvas>`) jadi fondasi: overlay SVG jadi sibling `<img>`/`<PdfPageCanvas>` di dalam wrapper yang sama, jadi pan/zoom otomatis berlaku ke markup tanpa perhitungan koordinat tambahan. Ukuran box overlay diukur via `ResizeObserver` pada `contentRef` (`useElementBox`, lihat bug 16a di §8 soal cara BENAR memicu ulang efeknya).
+
+**RBAC markup**: `ENGINEER`/`COORDINATOR`/`ADMIN` boleh menggambar; **Management melihat markup (dibagikan ke semua anggota proyek) tapi TIDAK melihat tool menggambar/color picker** — tool "Pilih"/"Geser" tetap tampil untuk semua peran (termasuk Management, supaya tetap bisa drag-to-pan gambar yang di-zoom) lewat `AnnotationToolbar`'s prop `canDraw` yang cuma menyaring 4 tombol tool-gambar + palet warna, bukan menyembunyikan toolbar-nya sekaligus. Edit/hapus markup dibatasi ke pembuat sendiri atau Coordinator/Admin (`assertOwnerOrCoordinator()` di backend, `canEditAnnotation()` di frontend — pola identik `assertCanDeleteAttachment`/`canDeleteAttachment` di Tahap 2). Validasi geometri (tiap koordinat finite & di [0,1], freehand maks 2000 titik, payload maks 64KB) **wajib di service**, bukan `class-validator` di DTO, karena discriminated union di atas kolom `Json` tidak bisa dinyatakan lewat decorator.
+
+**PDF via `pdfjs-dist` (pin versi eksak `6.2.108`, bukan `^`)**, diisolasi total di `PdfPageCanvas.tsx` dan cuma dimuat lewat `dynamic(() => import(...), { ssr:false })` dari modal — pdf.js menyentuh `DOMMatrix`/`document` saat import, jadi TIDAK BOLEH pernah ter-import statis (akan meledak di SSR). Worker-nya (`pdf.worker.min.mjs`) **di-copy ke `public/` lewat script `scripts/copy-pdf-worker.mjs`**, dijalankan otomatis via hook npm `predev`/`prebuild` — bukan diresolve bundler (`new URL(..., import.meta.url)` rapuh antara Turbopack dev vs `next build`). File hasil copy di-gitignore, regenerasi tiap `npm install`. **Ini risiko teknis terbesar di seluruh update ke-16** dan divalidasi eksplisit dengan `next build` sukses (bukan cuma `next dev`) sebelum dianggap selesai.
+
+"Unduh dengan markup" meratakan **sepenuhnya di client**: gambar sumber (atau halaman PDF, `scale:2` via `pdfjs-dist` langsung, bukan lewat `PdfPageCanvas`) digambar ke `<canvas>` offscreen pada resolusi natural, markup diputar ulang lewat `toPixels()` yang sama, lalu `canvas.toBlob()` → download. Unduhan biasa (tombol "Unduh") **tetap file asli byte-demi-byte, tidak pernah tersentuh** — markup itu murni layer terpisah, sesuai permintaan awal user.
+
+Anotasi **sengaja bukan bagian dari `data-context.tsx`** — state lokal modal (fetch/mutate langsung pakai `apiGet`/`apiPost`/`apiPatch`/`apiDelete` dari dalam `AttachmentPreviewModal.tsx`), karena sifatnya per-lampiran dan berumur pendek, beda dari `clashesById`/`attachments` yang dipakai lintas-halaman.
+
+**Juga di update ke-16 (perubahan kecil tapi lintas RBAC):** Management sekarang bisa berkomentar — `canComment()` (yang tadinya `role !== "Management"`) **dihapus total** dari `lookup.ts`, bersama pesan baca-saja "Peran Management bersifat baca-saja dan tidak dapat menambah komentar." di `clashes/[id]/page.tsx`; backend `@Roles()` di `POST /clashes/:id/comments` tambah `Role.MANAGEMENT`. Alasannya: komentar itu diskusi, bukan edit yang mengubah state clash — beda kelas dari kolom "Edit item" di tabel RBAC §6 yang memang sengaja membatasi Management.
+
+**Pasca-implementasi — dua bug ditemukan HANYA lewat verifikasi browser sungguhan, keduanya lolos test otomatis pada percobaan pertama. Baca §8 (bagian "update ke-16") untuk kronologi lengkap sebelum mengubah `AnnotationLayer.tsx`/`AttachmentPreviewModal.tsx` lagi**, ringkasannya:
+- `useElementBox` memicu *"Maximum update depth exceeded"* — `setState` di efek tanpa dependency array yang benar (lihat bug 16a).
+- **Markup teks TIDAK BISA DIKETIK SAMA SEKALI dengan mouse sungguhan**, meski semua unit test (termasuk yang khusus dibuat utk memverifikasi ini) lolos hijau — event sintetis (`dispatchEvent`) yang dipakai testing tidak meniru *default action* browser, dan justru default action itulah sumber bugnya (`mousedown` memindah fokus ke `<body>` setelah React memasang input, lihat bug 16b). **Pelajaran paling mahal di update ini**: fitur interaktif berbasis pointer/mouse (drag, klik-ganda, gambar bebas) HARUS diverifikasi dengan `computer` tool (klik/ketik sungguhan) di Browser pane, bukan cuma `javascript_tool`'s `dispatchEvent` atau unit test — keduanya bisa lolos hijau di atas fitur yang benar-benar rusak.
+
 ---
 
 ## 6. RBAC yang ditegakkan
 
-| Peran | Register | Bulk update | Export | Buat clash | Edit item | Komentar | Dashboard | Admin | Import CSV |
-|---|---|---|---|---|---|---|---|---|---|
-| **Engineer** | ✅ | ❌ | ✅ | ✅ | Item sendiri, status maju 1 langkah saja | ✅ | ❌ | ❌ | ❌ |
-| **Coordinator** | ✅ | ✅ | ✅ | ✅ | Penuh¹ | ✅ | ✅ | ❌ | ✅ |
-| **Management** | ✅ baca-saja | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
-| **Admin** | ✅ | ✅ | ✅ | ✅ | Penuh¹ | ✅ | ✅ | ✅ | ✅ |
+| Peran | Register | Bulk update | Export | Buat clash | Edit item | Hapus clash | Komentar² | Lampiran³ | Markup⁴ | Dashboard | Admin | Import CSV |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **Engineer** | ✅ | ❌ | ✅ | ✅ | Item sendiri, status maju 1 langkah saja | ❌ | ✅ | Upload semua; hapus milik sendiri | Gambar semua; edit/hapus milik sendiri | ❌ | ❌ | ❌ |
+| **Coordinator** | ✅ | ✅ | ✅ | ✅ | Penuh¹ | ❌ | ✅ | Upload+hapus semua | Gambar+edit/hapus semua | ✅ | ❌ | ✅ |
+| **Management** | ✅ baca-saja | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ (sejak update ke-16) | Lihat/unduh saja | Lihat saja (tool Pilih/Geser tetap ada) | ✅ | ❌ | ❌ |
+| **Admin** | ✅ | ✅ | ✅ | ✅ | Penuh¹ | ✅ | ✅ | Upload+hapus semua | Gambar+edit/hapus semua | ✅ | ✅ | ✅ |
 
 ¹ **Assignee hanya boleh Engineer aktif** (permintaan ad-hoc pasca update ke-12, di luar Sprint Plan asli — bukan lagi "Engineer atau Coordinator"). "Penuh" berarti Coordinator/Admin boleh mengubah `assigneeId` ke user manapun *yang lolos aturan itu*, atau `null` untuk melepas — bukan benar-benar bebas. Ditegakkan `ClashesService.assertAssigneeIsEngineer()`, dipanggil dari dua jalur terpisah: `buildAllowedPatch()` (`PATCH /clashes/:id`) dan `bulkUpdate()` (`POST /clashes/bulk`, yang **tidak** melalui `buildAllowedPatch()` — sebelum perubahan ini, bulk-assign sama sekali tidak divalidasi). Data lama diperbaiki lewat migrasi `20260806120000_null_non_engineer_assignees` (assignee non-Engineer di-null-kan, tanpa baris `AuditLog` — lihat §12 untuk alasannya). Terverifikasi: dropdown assignee di UI (detail & bulk) cuma menampilkan Engineer aktif, **dan** `fetch()` langsung ke `PATCH /clashes/:id`/`POST /clashes/bulk` dengan `assigneeId` Coordinator dari console browser (melewati UI) → `400 Bad Request`, bukan tersembunyi doang di client.
 
-Aturan terpusat di frontend: `src/lib/lookup.ts` (`canEditClash`, `canComment`, `isAssignable`) + `src/lib/use-master-data.ts` (`allowedStatusTransitions`) + guard `use-require-auth.ts`/`use-require-admin.ts`.
+² **Sejak update ke-16, semua peran termasuk Management boleh berkomentar** — sebelumnya Management ditolak (`canComment()` lama). `canComment()` dihapus total, bukan diubah jadi selalu-`true` — tidak ada gating tersisa sama sekali, jadi jangan tambahkan lagi tanpa alasan baru.
+
+³ **Kolom baru update ke-16** — sebelumnya lampiran cuma bisa ditambah saat clash dibuat, tidak ada kontrol sama sekali dari halaman detail. "Item sendiri" di kolom Edit tidak berlaku di sini — Engineer boleh upload ke clash siapa pun di proyeknya, hapus dibatasi berdasar **siapa yang mengunggah**, bukan siapa assignee/reporter clash-nya. Lihat §5 Tahap 2.
+
+⁴ **Kolom baru update ke-16** — markup dibagikan ke semua anggota proyek (semua peran bisa MELIHAT), tapi menggambar/edit/hapus dibatasi seperti kolom Lampiran (berdasar pembuat markup, bukan assignee/reporter clash). Management tetap punya tool "Pilih"/"Geser" (bukan cuma baca statis) supaya bisa drag-to-pan gambar yang di-zoom. Lihat §5 Tahap 4.
+
+Hapus clash (Admin-only, soft-delete) tidak masuk kategori "Edit item" — dipisah kolom sendiri karena sifatnya beda (reversibel lewat `POST /:id/restore`, bukan mengubah field). Lihat §5 Tahap 1.
+
+Aturan terpusat di frontend: `src/lib/lookup.ts` (`canEditClash`, `canDeleteClash`, `canUploadAttachment`, `canDeleteAttachment`, `canDrawAnnotation`, `canEditAnnotation`, `isAssignable` — semua kecuali `canEditClash`/`isAssignable` baru update ke-16) + `src/lib/use-master-data.ts` (`allowedStatusTransitions`) + guard `use-require-auth.ts`/`use-require-admin.ts`.
 
 **Sejak Sprint 1, RBAC juga ditegakkan di server** — guard frontend kini sekadar UX, bukan satu-satunya pertahanan. `RolesGuard` di NestJS menolak dengan 403, dan `JwtAuthGuard` global menolak request tanpa token dengan 401. **Sejak `ClashesModule`, ini juga berlaku untuk kolom "Edit item"** — bukan cuma peran, tapi juga "item sendiri", "status maju 1 langkah", dan sekarang "assignee harus Engineer aktif" ditegakkan di `ClashesService`, sudah diverifikasi lewat `fetch()` langsung yang melewati UI. Tabel endpoint lengkap ada di `apps/api/README.md`.
 
@@ -387,6 +539,7 @@ Aturan terpusat di frontend: `src/lib/lookup.ts` (`canEditClash`, `canComment`, 
 | 10 | Fitur AI (opsional) | ❌ Belum | Butuh eval harness + AI asli |
 | 11 | Hardening, performa, deploy | 🟡 Sebagian besar selesai (update ke-11, rate limit & signed URL disempurnakan update ke-15) | Keamanan (helmet, rate limit **per-user sejak update ke-15**, exception filter, validasi env, refresh token versioning, RBAC lampiran, **signed URL lampiran sejak update ke-15**), observability (pino, Sentry opsional, `/health/ready`), dan uji beban 10.000 clash (semua target NFR lolos, terukur nyata) selesai. **Belum**: deploy ke host nyata (cuma artefak/dokumentasi, lihat §13), Prometheus, uptime 99,5% (butuh monitoring produksi riil). Lihat §12 untuk rincian lengkap. |
 | — | **Otorisasi multi-project** (ad-hoc, bukan sprint asli) | ✅ Selesai (update ke-12) | `ProjectContextGuard` + `@SkipProjectScope()`/`@ActiveProject()`, isolasi per-proyek server-side untuk clash/master-data/import, `assertClashInProject` (404 bukan 403), `CROSS_PROJECT_ROLES`, project switcher + kelola anggota di frontend, harness IDOR baru via `supertest` (**sempat tidak pernah benar-benar berjalan karena bug glob Jest/ESLint — diperbaiki update ke-15, lihat §1**), diverifikasi live browser. Lihat §5 "Otorisasi multi-project". |
+| — | **Soft-delete clash, kelola lampiran, pratinjau & markup vektor** (ad-hoc, bukan sprint asli) | ✅ Selesai (update ke-16) | 4 tahap: soft-delete Admin-only (`deletedAt` + `NOT_DELETED`), kelola lampiran penuh dari halaman detail (upload siapa saja, hapus cuma pengunggah/Coordinator/Admin), modal pratinjau (zoom/pan/refresh signed-URL proaktif), markup vektor (`Annotation` baru, overlay SVG, PDF via `pdfjs-dist`, "Unduh dengan markup"). + Management sekarang bisa berkomentar. Dua bug ditemukan HANYA lewat verifikasi mouse/keyboard sungguhan di browser — lolos semua unit test pada percobaan pertama (lihat §8/§9.28-30, wajib dibaca sebelum menyentuh `AnnotationLayer.tsx`). Lihat §5 "Soft-delete clash, kelola lampiran, pratinjau & markup vektor". |
 
 **Langkah berikutnya yang paling masuk akal:** lihat §12.
 
@@ -395,6 +548,11 @@ Aturan terpusat di frontend: `src/lib/lookup.ts` (`canEditClash`, `canComment`, 
 ## 8. Bug & jebakan yang ditemukan (lintas sesi)
 
 Dicatat supaya tidak terulang kalau menyentuh file yang sama.
+
+**Sesi siklus hidup clash & markup (update ke-16) — kedua bug ini paling berharga di seluruh dokumen ini, baca sebelum menyentuh `AnnotationLayer.tsx`/`AttachmentPreviewModal.tsx`:**
+
+16a. **`useElementBox` (hook baru, ukur box render `<img>`/`<canvas>` via `ResizeObserver` utk overlay markup) memicu *"Maximum update depth exceeded"*.** Versi pertama memanggil `setBox({ width, height })` di dalam `useEffect` **tanpa dependency array** — efek jalan tiap render, `setBox` selalu dapat objek baru (walau nilainya sama), React re-render, efek jalan lagi, tanpa henti. Perbaikan pertama (tambah dependency array `[resetKey]` dari `current?.id`) **masih kurang**: pada render pertama `contentRef`-nya belum ter-mount sama sekali (elemen di balik placeholder "Memuat…" sampai `url` dari `useSignedUrl` resolve), jadi efek langsung `return` tanpa memasang observer — dan karena `resetKey` (id lampiran) tidak berubah lagi setelah `url` resolve, efeknya **tidak pernah dicoba ulang**, overlay markup tidak pernah muncul sama sekali. Perbaikan final: (1) `setBox` pakai updater fungsional yang cek kesetaraan nilai dulu (`prev.width === next.width && prev.height === next.height ? prev : next`) — memutus loop meski efek jalan berkali-kali; (2) dependency array hook diperluas jadi array eksplisit yang WAJIB menyertakan kondisi yang menggerbang elemen itu benar-benar ter-render (`[current?.id, url]`, bukan cuma `current?.id`) — kalau elemen di balik `ref` dikontrol kondisional (loading state, dst.), effect harus tahu kapan kondisi itu berubah, bukan cuma kapan "identitas logis"-nya berubah. **Pelajaran umum**: kalau bikin hook custom yang mengukur/mengobservasi elemen di balik ref, dependency array efeknya harus mencakup SEMUA kondisi yang menentukan kapan `ref.current` benar-benar terisi — bukan cuma id/key yang "kelihatan relevan".
+16b. **Markup teks (tool "Teks" di `AnnotationLayer.tsx`) sama sekali tidak bisa diketik dengan mouse sungguhan — meski SEMUA unit test lolos, termasuk yang dibuat khusus untuk memverifikasi alur ini.** Kronologi: user melaporkan "tidak bisa edit text", agen memperbaiki 2 bug lain (termasuk 16a), menguji ulang dengan `javascript_tool`'s `dispatchEvent(new PointerEvent(...))` — lolos, dilaporkan "sudah bisa". User mencoba lagi di browser sungguhan — **masih tidak bisa sama sekali**. Root cause: klik `mousedown` pada elemen non-form (di sini `<svg>`) punya *default action* browser bawaan yaitu memindahkan fokus ke `<body>` — **default action ini dieksekusi SETELAH semua React event handler untuk event yang sama selesai**, termasuk commit yang memasang `<input autoFocus>`. Urutannya: `mousedown` → React `onPointerDown` handler jalan → `setTextDraft(...)` → React commit → `<input>` muncul & dapat fokus lewat `autoFocus` → **baru kemudian** browser menjalankan default action `mousedown` → fokus pindah ke `<body>` → `<input>` ter-blur di tick yang sama → `onBlur={commitText}` jalan dengan value masih kosong → input ditutup. Dari sudut pandang user: kotak input berkedip sepersekian detik lalu hilang, tidak sempat mengetik apa pun. **Kenapa lolos test**: `fireEvent`/`dispatchEvent` (baik dari Testing Library maupun `javascript_tool`) membuat event sintetis yang **tidak** memicu default action browser bawaan sama sekali — jadi langkah "browser pindahkan fokus ke body" itu tidak pernah terjadi di lingkungan test, dan assertion "input tetap ada & fokus" selalu benar di sana walau salah total di browser nyata. Perbaikan: `handleMouseDown` baru di `<svg>` yang memanggil `e.preventDefault()` — ini secara eksplisit membatalkan default action `mousedown`, termasuk pemindahan fokusnya. Test regresi baru (`AnnotationLayer.test.tsx`, "focus handling") sengaja **tidak** cuma cek state React, tapi assert `fireEvent.mouseDown(...)` mengembalikan `false` (tandanya `preventDefault()` benar-benar dipanggil) — itulah satu-satunya cara unit test bisa menangkap kelas bug ini sama sekali. **Pelajaran paling mahal di seluruh sesi**: untuk fitur interaktif berbasis pointer/mouse (drag-to-draw, klik-ganda, gambar bebas, apa pun yang punya alur fokus/gesture), **unit test dan `dispatchEvent` TIDAK CUKUP** — wajib diverifikasi dengan `computer` tool (klik & ketik sungguhan) di Browser pane sebelum melaporkan selesai ke user, karena default action browser adalah kelas bug yang benar-benar tidak terlihat lewat simulasi event sintetis apa pun.
 
 **Sesi utang test & hardening (update ke-15):**
 
@@ -459,6 +617,13 @@ c. **Prisma `ClashUpdateInput` (checked) tidak mengekspos field FK skalar** keti
 25. **`X-Project-Id` cuma dibaca dari header, bukan dari body/query.** Kalau menambah endpoint baru yang butuh tahu proyek aktif, pakai `@ActiveProject()` (nilai yang sudah diverifikasi `ProjectContextGuard`) — jangan baca `projectId` dari DTO/body/query request, itu datang dari client dan tidak diverifikasi kepemilikannya sama sekali.
 26. **`CROSS_PROJECT_ROLES` (`common/constants/project-roles.ts`) itu satu-satunya tempat yang menentukan siapa bypass keanggotaan proyek.** Dipakai di dua tempat berbeda (`ProjectContextGuard` untuk cek akses, `ProjectsService.listAll/findCurrent` untuk isi daftar proyek) — kalau salah satunya diubah tanpa yang lain, Coordinator/Management/Admin bisa "diizinkan pakai proyek X" oleh guard tapi "tidak pernah melihat proyek X" di dropdown switcher (atau sebaliknya). Selalu ubah lewat konstanta ini, jangan hardcode `Role.ADMIN`/dst. di tempat baru.
 27. **Resource yang beda proyek harus 404, bukan 403 — lihat §8y.** Kalau menambah resource-scoped check baru (mis. suatu saat ada model baru yang butuh isolasi proyek), ikuti pembagian: guard-level (header salah/non-member) → 403, resource-level (data ada tapi bukan di proyek aktif) → 404.
+28. **Modul yang menyentuh `document`/`DOMMatrix` (`pdfjs-dist`, dan sejenisnya) HARUS diisolasi di file terpisah dan dimuat lewat `next/dynamic(() => import(...), { ssr: false })`.** Import statis akan meledak saat SSR/build (`document is not defined`) dan **tidak akan pernah berjalan di Vitest/jsdom** (jsdom tidak implementasi `getContext` canvas yang dibutuhkan pdf.js) — jangan pernah mengimpor `PdfPageCanvas.tsx` langsung dari file test, `vi.mock()` modulnya. Worker pdf.js (`pdf.worker.min.mjs`) tidak boleh diresolve bundler (`new URL(..., import.meta.url)` rapuh antara Turbopack dev vs `next build`) — dicopy ke `public/` lewat `scripts/copy-pdf-worker.mjs` via hook npm `predev`/`prebuild`, file hasil copy di-gitignore. Kalau menambah dependency serupa (WASM, native binding, dll.) yang cuma jalan di browser, ikuti pola yang sama: isolasi + dynamic import + verifikasi eksplisit dengan `next build` (bukan cuma `next dev`) sebelum dianggap selesai — lihat §8 (update ke-16) untuk kenapa ini ditandai sebagai risiko teknis terbesar sesi itu.
+29. **`mousedown`/`click` pada elemen non-form (SVG, div, dst.) yang memasang `<input autoFocus>` sebagai respons harus `preventDefault()` pada `mousedown`-nya kalau ingin inputnya benar-benar bisa diketik.** Default action bawaan `mousedown` (memindah fokus ke elemen yang diklik atau `<body>`) dieksekusi browser **setelah** semua React event handler & commit untuk event yang sama — jadi urutan sebenarnya adalah "input dipasang & fokus lewat `autoFocus`" **lalu** "browser pindahkan fokus lagi" **lalu** input itu ter-blur di tick yang sama sebelum sempat ada input keyboard apa pun. Lihat §8 16b untuk kronologi lengkap (termasuk kenapa ini lolos semua unit test) — kalau menambah pola UI serupa (klik di kanvas/SVG untuk memunculkan input inline), langsung terapkan `onMouseDown={(e) => e.preventDefault()}` di elemen pemicunya, jangan tunggu bug ini terulang.
+30. **Unit test dan `fireEvent`/`dispatchEvent` TIDAK memicu default action browser bawaan (perpindahan fokus, submit form, navigasi link, dst.) — jangan pernah menyimpulkan "fitur pointer/mouse ini berfungsi" hanya dari situ.** Ini alasan bug §8 16b lolos test pada percobaan pertama dan lolos verifikasi `javascript_tool`'s `dispatchEvent` pada percobaan kedua — baru ketahuan saat user mencoba dengan mouse sungguhan. **Aturan wajib untuk sesi berikutnya**: setiap fitur yang melibatkan gesture pointer (drag, klik-ganda, gambar bebas, apa pun yang bergantung pada urutan fokus/blur) harus diverifikasi dengan `computer` tool (klik & ketik betulan) di Browser pane SEBELUM dilaporkan selesai — bukan cukup dengan unit test hijau atau `javascript_tool`. Kalau test regresi ditulis untuk kelas bug ini, assert pada `defaultPrevented`/nilai balik `fireEvent.*()` (`false` berarti `preventDefault()` terpanggil), bukan cuma state React — lihat pola di `AnnotationLayer.test.tsx` "focus handling".
+31. **`Clash_uniqueCode_live_key` dan `Clash_disciplineId_seq_live_key` (kedua partial unique index yang membuat gap-filling clash code bekerja, ditambah di migrasi `20260808120000_project_archive_and_clash_seq`) TIDAK bisa dinyatakan di `schema.prisma`** — Prisma tidak punya sintaks partial index. Setiap `prisma migrate dev` akan mem-diff schema terhadap shadow DB dan mencoba `DROP INDEX` keduanya lalu membuat ulang versi non-partial (yang salah). **Selalu edit migrasi yang di-generate untuk menghapus baris `DROP`/`CREATE INDEX` itu** sebelum `migrate dev` menerapkannya — jangan pernah biarkan window tanpa index sama sekali (satu migrasi tunggal untuk drop+create, jangan dipisah). Jalankan `npm run check:clash-seq` (baca `apps/api/scripts/check-clash-seq.ts`) setelah migrasi apa pun yang menyentuh tabel `Clash` untuk memastikan invarian `uniqueCode == project.code + '-' + discipline.code + '-' + seq` masih benar.
+32. **Kode clash sekarang mengisi celah, dan restore bisa mengubah kode.** Sejak update fitur arsip-proyek/rename-cascade/gap-fill: hapus (soft-delete) sebuah clash membebaskan `uniqueCode`/`seq`-nya untuk dipakai clash baru di disiplin yang sama (`ClashesService.createClashRecord`, alokator di `clashes/clash-code.ts`). Kalau clash yang dihapus itu di-restore lewat `POST /clashes/:id/restore` dan kodenya sudah "diambil" clash lain, `restore()` memberi kode BARU di ujung urutan dan mencatatnya sebagai `AuditLog` action `code_reassigned` — bukan lagi lossless seperti sebelumnya. Kalau menambah `AuditLog.action` baru terkait ini, ingat gotcha 21: tambahkan case eksplisit di `auditText()` (`src/app/clashes/[id]/page.tsx`) untuk `code_changed` dan `code_reassigned`.
+33. **Ada instalasi PostgreSQL 16 native Windows (service `postgresql-x64-16`, `C:\Program Files\PostgreSQL\16`) yang ikut listen di port 5432**, terpisah dari container `clashhub-postgres` yang dibuat `docker-compose.yml`. Karena keduanya bind ke `0.0.0.0:5432`/`::1:5432`, koneksi `localhost:5432` dari proses Node/Prisma di Windows host mendarat di service native itu, BUKAN di container Docker — container-nya kosong (`\dt` di dalamnya nol tabel) sementara data proyek yang sesungguhnya (seed + histori manual) ada di service native. Kalau `docker exec clashhub-postgres psql ...` menunjukkan tabel kosong padahal `prisma migrate status` bilang "up to date", ini penyebabnya — cek data lewat `psql` native (`"C:\Program Files\PostgreSQL\16\bin\psql.exe" -h localhost -U clashuser -d clashhub_db`), bukan lewat `docker exec`. Belum diperbaiki (di luar cakupan sesi ini); kalau mau menyelaraskan dengan alur `docker compose` yang didokumentasikan di §10, salah satu dari keduanya harus dimatikan atau port-nya diubah.
+34. **`pg_advisory_xact_lock(int4, int4)` butuh KEDUA argumen persis `int4` — literal angka JS biasa lewat Prisma tagged-template raw query dikirim sebagai `bigint`, bukan `int4`, dan gagal runtime dengan error `42883` (`function ... does not exist`) yang TIDAK ketahuan oleh test unit manapun** karena semua test memock `$executeRaw`/`$queryRaw` sepenuhnya — hanya ketahuan lewat klik manual di browser sungguhan yang menembak Postgres asli (lihat `clash-code.ts` `lockDiscipline()`, ditemukan & diperbaiki saat verifikasi fitur arsip-proyek/rename-cascade/gap-fill: `restore()` gagal 500 di browser padahal 63 test clashes.service.spec.ts hijau semua). **Pelajaran wajib**: kalau raw SQL Prisma memanggil fungsi Postgres dengan overload sempit (banyak fungsi built-in cuma punya varian `int4`/`int8` tertentu, bukan keduanya), selalu cast eksplisit tipe tiap parameter (`${x}::int4`) alih-alih mengandalkan inferensi tipe Prisma — dan verifikasi lewat DB nyata (browser/`psql`), bukan cuma test bermock, untuk kode yang isi query-nya memanggil fungsi Postgres spesifik (bukan cuma `SELECT`/`UPDATE` generik).
 
 ---
 
@@ -489,10 +654,21 @@ npm run dev                            # Web → http://localhost:3000
 Pemeriksaan:
 
 ```bash
-npm run build && npm run lint && npm test   # frontend (build+lint+36 test — 31 lama + 5 isAssignable baru, update ke-13)
+npm run build && npm run lint && npm test   # frontend — build+lint+120 test/10 file (naik dari 57/5,
+                                             # update ke-16: +DeleteClashDialog, +AttachmentPanel,
+                                             # +AttachmentPreviewModal, +AnnotationLayer, +annotations.ts,
+                                             # +lookup diperluas). Build juga memvalidasi worker pdfjs-dist
+                                             # (lihat §9.28) — jangan skip langkah build ini kalau menyentuh
+                                             # PdfPageCanvas.tsx/AttachmentPreviewModal.tsx
 npm --prefix apps/api run build             # backend
-npm --prefix apps/api run lint              # backend lint (sejak update ke-10, lihat §1) — 0 error, 35 warning (6 dari fast-xml-parser untyped sejak sebelumnya + 29 baru dari project-isolation.e2e-spec.ts's supertest/app.getHttpServer() yang untyped, update ke-12 — sama-sama didokumentasikan sebagai warning yang aman, bukan diabaikan diam-diam)
-npm --prefix apps/api test                  # 103 unit+e2e test (12 suite: RolesGuard, ProjectContextGuard, AuthService, ClashesService [+isolasi proyek update ke-12, +validasi assignee Engineer-only update ke-13: 96 lama + 7 baru], NotificationsProcessor, OverdueScannerService, NotificationPreferenceService, ImportProcessor, ImportService, parser CSV/XML, MasterDataService.copyTemplate, project-isolation.e2e-spec [satu-satunya yang lewat HTTP sungguhan via supertest])
+npm --prefix apps/api run lint              # backend lint (sejak update ke-10, lihat §1) — 0 error,
+                                             # warning bawaan tidak berubah (fast-xml-parser + supertest
+                                             # untyped) meski cakupan lint bertambah lewat modul anotasi
+npm --prefix apps/api test                  # 190 unit+e2e test/18 suite (naik dari 147/17, update ke-16:
+                                             # +annotations.service.spec.ts baru, +storage.service.spec.ts
+                                             # (delete), +clashes.service.spec.ts (soft-delete/restore/
+                                             # deleteAttachment), +overdue-scanner & notifications-processor
+                                             # (filter clash terhapus)
 ```
 
 Docker (opsional, untuk memverifikasi image produksi — lihat README §"Menjalankan dengan Docker"):
@@ -563,6 +739,13 @@ Drill-down dashboard → register memakai parameter yang sama (termasuk `overdue
   - `ImportService.getJob()` masih otorisasi berbasis "pembuat job atau Admin" (bukan berbasis membership proyek) — sengaja dipertahankan apa adanya (lebih ketat, bukan lebih longgar) karena di luar scope permintaan; kalau nanti mau diselaraskan supaya Coordinator lain di proyek yang sama juga bisa lihat job, itu perubahan kebijakan produk, bukan perbaikan bug.
   - ~~Belum ada test untuk endpoint membership (`GET/POST/DELETE /projects/:projectId/members`)~~ — **selesai (update ke-15)**: 11 unit test (`projects.service.spec.ts`) + 8 test HTTP (`project-members.e2e-spec.ts` baru), lihat §1.
   - `Status`/`Priority` sengaja **tetap global** lintas proyek (keputusan eksplisit user selama sesi ini, bukan keterbatasan teknis) — kalau produk nanti butuh status/prioritas berbeda per proyek, itu perubahan schema (`projectId` di kedua model) + migrasi data, bukan sekadar ubah guard.
+- **Soft-delete clash, kelola lampiran, pratinjau & markup vektor** — **selesai (update ke-16)**, lihat §5 subbab terkait, §6, §7, §8 (16a/16b), §9.28-30. **Yang masih bisa dikerjakan lebih lanjut, bukan blocker**:
+  - Belum ada UI "keranjang sampah" untuk clash terhapus di frontend — endpoint `GET /clashes?deleted=1` dan `POST /:id/restore` sudah ada dan sudah diverifikasi lewat backend/manual, tapi Admin harus lewat `fetch()`/API client langsung untuk restore, belum ada halaman.
+  - Markup tidak punya resize handle (keputusan sengaja, bukan keterbatasan) — mengubah ukuran/posisi kotak/panah yang sudah dibuat berarti hapus lalu gambar ulang, bukan drag titik sudut. Kalau produk butuh presisi lebih, itu penambahan fitur baru, bukan bug.
+  - "Unduh dengan markup" cuma meratakan **halaman PDF yang sedang aktif** ke satu PNG — tidak menyusun ulang PDF multi-halaman beranotasi. Kalau produk butuh itu, perlu `jspdf` (sudah jadi dependency untuk export lain) menyusun tiap halaman yang sudah diratakan jadi satu file PDF baru.
+  - `PATCH .../annotations/:id` (endpoint update backend, dites & berfungsi) cuma dipakai UI untuk **mengedit isi teks** lewat klik-ganda — tidak ada jalur UI untuk mengubah warna/`strokeWidth` anotasi yang sudah dibuat (server mendukungnya, frontend belum memanggilnya untuk field itu). Bukan bug, cuma belum ada tombolnya.
+  - Markup TEXT belum ada batas panjang di frontend (backend membatasi `text` maks 500 karakter lewat DTO, sudah cukup sebagai penjaga) — kalau mau UX yang lebih baik, tambahkan counter karakter di input inline-nya.
+  - Modal pratinjau belum ada thumbnail strip/grid semua lampiran sekaligus — navigasi cuma panah kiri/kanan satu-satu. Cukup untuk jumlah lampiran per clash saat ini (maks 10, lihat validasi upload).
 
 ---
 
