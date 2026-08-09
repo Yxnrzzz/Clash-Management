@@ -89,6 +89,8 @@ export interface ApiClash {
   createdAt: string;
   closedAt: string | null;
   deletedAt: string | null;
+  resolveProposed: string | null;
+  resolveByConsultant: string | null;
 }
 
 export interface ApiComment {
@@ -110,6 +112,8 @@ export interface ApiAuditLog {
   createdAt: string;
 }
 
+export type ApiAttachmentRole = "ORIGINAL" | "CLASH_DETECTION" | "OTHER";
+
 export interface ApiAttachment {
   id: string;
   clashId: string;
@@ -118,6 +122,7 @@ export interface ApiAttachment {
   sizeBytes: number;
   uploadedById: string;
   createdAt: string;
+  role: ApiAttachmentRole;
 }
 
 export type ApiAnnotationKind = "RECT" | "ARROW" | "FREEHAND" | "TEXT";
@@ -145,6 +150,50 @@ export interface ApiClashDetail extends ApiClash {
 export interface ApiClashListResponse {
   data: ApiClash[];
   total: number;
+}
+
+/**
+ * GET /clashes/report — the consultant-format report feed. A different shape
+ * from ApiClash on purpose: it carries joined names (the report prints
+ * "Basement 2 Plan", not a zone id) and the two role-tagged images with
+ * everything needed to render them, so the browser never has to fan out one
+ * request per clash.
+ */
+export interface ApiReportImage {
+  attachmentId: string;
+  fileName: string;
+  fileType: string;
+  /** Signed, 15-minute TTL, no auth headers required. Prefix with /api. */
+  url: string;
+  expiresAt: number;
+  annotations: ApiAnnotation[];
+}
+
+export interface ApiClashReportRow {
+  id: string;
+  uniqueCode: string;
+  title: string;
+  description: string;
+  createdAt: string;
+  closedAt: string | null;
+  resolveProposed: string | null;
+  resolveByConsultant: string | null;
+  discipline: { id: string; code: string; name: string };
+  zone: { id: string; name: string; level: string };
+  status: { id: string; name: string };
+  original: ApiReportImage | null;
+  clashDetection: ApiReportImage | null;
+}
+
+export interface ApiClashReportResponse {
+  data: ApiClashReportRow[];
+  /** May exceed data.length — the server caps rows at `maxRows`. */
+  total: number;
+  maxRows: number;
+}
+
+export interface ApiReportCapability {
+  enabled: boolean;
 }
 
 export interface ApiNotificationPreference {

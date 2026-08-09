@@ -34,6 +34,7 @@ const ATTACHMENT: Attachment = {
   ukuranBytes: 2048,
   uploadedBy: "u-eng-1",
   createdAt: "2026-01-01T00:00:00.000Z",
+  role: "OTHER",
 };
 
 function renderPanel(overrides: Partial<Parameters<typeof AttachmentPanel>[0]> = {}) {

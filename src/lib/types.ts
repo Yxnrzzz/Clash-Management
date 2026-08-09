@@ -44,6 +44,11 @@ export interface Priority {
   isActive: boolean;
 }
 
+/** Kolom mana di laporan "Tabel Clash Detection" yang diisi lampiran ini.
+ * Tetap berbahasa Inggris seperti Annotation.kind — nilainya adalah enum
+ * yang dikirim/diterima API apa adanya, bukan teks yang ditampilkan. */
+export type AttachmentRole = "ORIGINAL" | "CLASH_DETECTION" | "OTHER";
+
 export interface Attachment {
   id: string;
   clashId: string;
@@ -52,6 +57,7 @@ export interface Attachment {
   ukuranBytes: number;
   uploadedBy: string;
   createdAt: string;
+  role: AttachmentRole;
 }
 
 export interface Comment {
@@ -89,6 +95,11 @@ export interface Clash {
   createdAt: string;
   closedAt: string | null;
   deletedAt: string | null;
+  // Dua kolom laporan konsultan. Namanya dibiarkan Inggris karena itu label
+  // kolom yang dicetak di dokumen — menerjemahkannya di sini hanya membuat
+  // pemetaan ke header xlsx jadi tebak-tebakan.
+  resolveProposed: string | null;
+  resolveByConsultant: string | null;
 }
 
 export interface NewClashInput {
@@ -98,7 +109,15 @@ export interface NewClashInput {
   priorityId: string;
   deskripsi: string;
   dueDate?: string;
-  attachments: { namaFile: string; tipe: "image" | "pdf" | "other"; ukuranBytes: number; file?: File }[];
+  // `role` opsional: kalau dibiarkan kosong, lampiran mendarat sebagai OTHER
+  // (DEFAULT di database) dan tidak muncul di laporan sampai ditandai.
+  attachments: {
+    namaFile: string;
+    tipe: "image" | "pdf" | "other";
+    ukuranBytes: number;
+    file?: File;
+    role?: AttachmentRole;
+  }[];
 }
 
 export interface NotificationPreference {

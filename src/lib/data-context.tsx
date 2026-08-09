@@ -56,6 +56,7 @@ import type {
 import type {
   AuditLogEntry,
   Attachment,
+  AttachmentRole,
   Clash,
   Comment,
   Discipline,
@@ -125,7 +126,13 @@ interface MasterState {
   notificationPreference: NotificationPreference | null;
 }
 
-type ClashEditableField = "assigneeId" | "priorityId" | "dueDate" | "statusId";
+type ClashEditableField =
+  | "assigneeId"
+  | "priorityId"
+  | "dueDate"
+  | "statusId"
+  | "resolveProposed"
+  | "resolveByConsultant";
 
 interface DataContextValue extends MasterState {
   isLoading: boolean;
@@ -165,6 +172,11 @@ interface DataContextValue extends MasterState {
   uploadAttachments: (clashId: string, files: File[]) => Promise<void>;
   /** Hard-deletes one attachment (server-side: DB row + on-disk file). */
   deleteAttachment: (clashId: string, attachmentId: string) => Promise<void>;
+  updateAttachmentRole: (
+    clashId: string,
+    attachmentId: string,
+    role: AttachmentRole
+  ) => Promise<void>;
 
   /** Admin-only — creates the project and switches to it immediately (it
    * starts with no disciplines/zones/members for the admin to set up next). */
@@ -391,18 +403,38 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       );
       const created = toClash(createdApi);
 
-      const files = input.attachments.map((a) => a.file).filter((f): f is File => !!f);
-      if (files.length > 0) {
+      // Peran dibawa terpisah dari file-nya supaya tetap sejajar: upload
+      // multipart tidak punya tempat yang aman untuk array peran per-file,
+      // jadi kirim file dulu lalu tandai id yang dikembalikan (urutan respons
+      // mengikuti urutan file yang dikirim).
+      const staged = input.attachments.filter((a) => a.file);
+      if (staged.length > 0) {
         const formData = new FormData();
-        for (const file of files) formData.append("files", file);
-        await runWrite(
+        for (const a of staged) formData.append("files", a.file as File);
+        const createdAttachments = await runWrite(
           () => apiUpload<ApiAttachment[]>(`/clashes/${created.id}/attachments`, formData),
-          (createdAttachments) =>
+          (result) =>
             patchMaster((prev) => ({
               ...prev,
-              attachments: mergeById(prev.attachments, createdAttachments.map(toAttachment)),
+              attachments: mergeById(prev.attachments, result.map(toAttachment)),
             }))
         );
+
+        const tagged = createdAttachments
+          .map((att, i) => ({ att, role: staged[i]?.role }))
+          .filter((x): x is { att: ApiAttachment; role: AttachmentRole } => !!x.role && x.role !== "OTHER");
+
+        if (tagged.length > 0) {
+          const patched = await Promise.all(
+            tagged.map(({ att, role }) =>
+              apiPatch<ApiAttachment>(`/clashes/${created.id}/attachments/${att.id}`, { role })
+            )
+          );
+          patchMaster((prev) => ({
+            ...prev,
+            attachments: mergeById(prev.attachments, patched.map(toAttachment)),
+          }));
+        }
       }
 
       return created;
@@ -535,6 +567,28 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           patchMaster((prev) => ({
             ...prev,
             attachments: prev.attachments.filter((a) => a.id !== attachmentId),
+          }))
+      );
+      await loadClashDetail(clashId);
+    },
+    [patchMaster, runWrite, loadClashDetail]
+  );
+
+  /** Menandai kolom laporan mana yang diisi lampiran ini — lihat
+   * AttachmentRole. Mengikuti pola deleteAttachment di atas: tulis optimistis
+   * ke master state, lalu muat ulang detail supaya baris audit yang ditulis
+   * server ikut terbawa. */
+  const updateAttachmentRole = useCallback(
+    async (clashId: string, attachmentId: string, role: AttachmentRole): Promise<void> => {
+      await runWrite(
+        () =>
+          apiPatch<ApiAttachment>(`/clashes/${clashId}/attachments/${attachmentId}`, { role }),
+        () =>
+          patchMaster((prev) => ({
+            ...prev,
+            attachments: prev.attachments.map((a) =>
+              a.id === attachmentId ? { ...a, role } : a
+            ),
           }))
       );
       await loadClashDetail(clashId);
@@ -938,6 +992,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       deleteClash,
       uploadAttachments,
       deleteAttachment,
+      updateAttachmentRole,
       createProject,
       updateProjectName,
       renameProjectCode,
@@ -975,6 +1030,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       deleteClash,
       uploadAttachments,
       deleteAttachment,
+      updateAttachmentRole,
       createProject,
       updateProjectName,
       renameProjectCode,

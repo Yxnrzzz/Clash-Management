@@ -150,6 +150,8 @@ export const toClash = (c: ApiClash): Clash => ({
   createdAt: c.createdAt,
   closedAt: c.closedAt,
   deletedAt: c.deletedAt,
+  resolveProposed: c.resolveProposed ?? null,
+  resolveByConsultant: c.resolveByConsultant ?? null,
 });
 
 export const toComment = (c: ApiComment): Comment => ({
@@ -179,6 +181,9 @@ export const toAttachment = (a: ApiAttachment): Attachment => ({
   ukuranBytes: a.sizeBytes,
   uploadedBy: a.uploadedById,
   createdAt: a.createdAt,
+  // Lampiran yang diunggah sebelum kolom role ada akan mengirim undefined —
+  // perlakukan sebagai OTHER, sama dengan DEFAULT di database.
+  role: a.role ?? "OTHER",
 });
 
 export const toAnnotation = (a: ApiAnnotation): Annotation => ({
@@ -227,6 +232,8 @@ export type ClashFieldPatch = Partial<{
   priorityId: string;
   assigneeId: string | null;
   dueDate: string | null;
+  resolveProposed: string | null;
+  resolveByConsultant: string | null;
 }>;
 
 // --- Notification preference ----------------------------------------------
