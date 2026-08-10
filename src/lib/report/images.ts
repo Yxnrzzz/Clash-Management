@@ -54,20 +54,37 @@ function isPdf(fileType: string): boolean {
   return fileType === "application/pdf";
 }
 
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error("Gagal membaca lampiran."));
+    reader.readAsDataURL(blob);
+  });
+}
+
 /**
- * URL bertanda tangan dipakai lebih dulu (tanpa header auth, jadi tidak ada
- * drama refresh token di tengah export multi-menit). Kalau ia menolak —
- * paling mungkin karena TTL 15 menit habis pada laporan yang sangat besar —
- * sekali coba ulang lewat rute terautentikasi, yang tidak punya kedaluwarsa.
+ * Sumber gambar untuk satu lampiran.
+ *
+ * URL bertanda tangan dipakai APA ADANYA, bukan diunduh dulu jadi blob:
+ * CSP aplikasi ini adalah `img-src 'self' data:` (lihat next.config.ts) dan
+ * TIDAK mengizinkan blob:, jadi object URL akan diblokir browser saat
+ * dipasang ke img.src. Terbukti secara empiris, bukan diasumsikan. Memakai
+ * URL same-origin langsung juga menghemat satu fetch penuh per gambar —
+ * pada 600 gambar itu bukan penghematan yang sepele.
+ *
+ * Rute terautentikasi baru dipakai kalau yang bertanda tangan gagal (paling
+ * mungkin TTL 15 menitnya habis pada laporan sangat besar). Hasilnya
+ * dikonversi ke data: URI, yang diizinkan CSP.
  */
-async function resolveSourceUrl(task: ImageTask, clashId: string): Promise<string> {
+async function resolveSourceUrl(
+  task: ImageTask,
+  clashId: string
+): Promise<{ url: string; revoke: boolean }> {
   const signed = `/api${task.ref.url}`;
   try {
-    const res = await fetch(signed, { method: "GET" });
-    if (res.ok) {
-      const blob = await res.blob();
-      return URL.createObjectURL(blob);
-    }
+    const probe = await fetch(signed, { method: "HEAD" });
+    if (probe.ok) return { url: signed, revoke: false };
   } catch {
     // jatuh ke rute terautentikasi
   }
@@ -75,7 +92,7 @@ async function resolveSourceUrl(task: ImageTask, clashId: string): Promise<strin
   const blob = await apiDownloadBlob(
     `/clashes/${clashId}/attachments/${task.attachmentId}/download`
   );
-  return URL.createObjectURL(blob);
+  return { url: await blobToDataUrl(blob), revoke: false };
 }
 
 export interface FetchImagesOptions {
@@ -112,11 +129,13 @@ export async function fetchReportImages(
       if (index >= tasks.length) return;
       const task = tasks[index];
 
-      let objectUrl: string | null = null;
       try {
-        objectUrl = await resolveSourceUrl(task, clashIdByAttachment.get(task.attachmentId) ?? "");
+        const source = await resolveSourceUrl(
+          task,
+          clashIdByAttachment.get(task.attachmentId) ?? ""
+        );
         const flattened = await renderFlattenedAttachment({
-          url: objectUrl,
+          url: source.url,
           kind: isPdf(task.ref.fileType) ? "pdf" : "image",
           pageNumber: 1,
           annotations: task.ref.annotations.map(toAnnotation),
@@ -134,7 +153,6 @@ export async function fetchReportImages(
           reason: error instanceof Error ? error.message : "tidak diketahui",
         });
       } finally {
-        if (objectUrl) URL.revokeObjectURL(objectUrl);
         done += 1;
         options.onProgress?.(done, tasks.length);
       }

@@ -15,7 +15,11 @@ import { formatDate, isAssignable } from "@/lib/lookup";
 import { exportClashesToExcel, exportClashesToPdf } from "@/lib/export";
 import { apiGet, ApiError } from "@/lib/api/client";
 import { toClash } from "@/lib/api/mappers";
-import type { ApiClashListResponse } from "@/lib/api/types";
+import type {
+  ApiClashListResponse,
+  ApiClashReportResponse,
+  ApiReportCapability,
+} from "@/lib/api/types";
 import type { Clash } from "@/lib/types";
 import { PriorityBadge, StatusBadge, OverdueBadge } from "@/components/Badge";
 import { FilterChipGroup } from "./FilterChips";
@@ -304,6 +308,31 @@ export function RegisterView() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
 
+  // --- Laporan clash (format konsultan) ---------------------------------
+  //
+  // Ditanya sekali saat mount, bukan disimpulkan dari kegagalan: tanpa ini
+  // tombolnya tetap terlihat setelah CLASH_REPORT_ENABLED dimatikan dan
+  // pengguna baru tahu setelah mengklik dan mendapat error. Gagal = tombol
+  // disembunyikan (fail closed).
+  const [reportEnabled, setReportEnabled] = useState(false);
+  const [reportProgress, setReportProgress] = useState<{ done: number; total: number } | null>(null);
+  const [reportSummary, setReportSummary] = useState<string | null>(null);
+  const reportAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<ApiReportCapability>("/clashes/report/capability")
+      .then((res) => {
+        if (!cancelled) setReportEnabled(res.enabled);
+      })
+      .catch(() => {
+        if (!cancelled) setReportEnabled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const toggleRowSelected = useCallback((id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -498,6 +527,112 @@ export function RegisterView() {
     }
   }
 
+  /**
+   * Laporan format konsultan. Jauh lebih berat dari kedua export di atas —
+   * setiap baris berarti browser mengunduh, mendekode, membakar markup, dan
+   * mengencode ulang sampai dua gambar — jadi ini satu-satunya export dengan
+   * progress dan pembatalan.
+   */
+  async function handleExportReport() {
+    setIsExporting(true);
+    setExportError(null);
+    setReportSummary(null);
+    setReportProgress(null);
+
+    const controller = new AbortController();
+    reportAbortRef.current = controller;
+
+    try {
+      const params = buildQueryParams(filters, EXPORT_PAGE_SIZE);
+      params.set("page", "1");
+      const res = await apiGet<ApiClashReportResponse>(`/clashes/report?${params.toString()}`);
+
+      if (res.data.length === 0) {
+        setExportError("Tidak ada data untuk diekspor dengan filter ini.");
+        return;
+      }
+
+      // Peringatan SEBELUM menghabiskan menit-menit mengambil gambar, bukan
+      // sesudah.
+      if (res.total > res.data.length) {
+        const proceed = window.confirm(
+          `Filter ini cocok dengan ${res.total} clash, tapi laporan dibatasi ${res.maxRows} baris. ` +
+            `Hanya ${res.data.length} baris teratas yang akan diekspor. Lanjutkan?`
+        );
+        if (!proceed) return;
+      }
+
+      const { collectImageTasks } = await import("@/lib/report/images");
+      const imageCount = collectImageTasks(res.data).length;
+      if (imageCount > 150) {
+        const proceed = window.confirm(
+          `Laporan ini berisi ${imageCount} gambar dan bisa memakan beberapa menit. Lanjutkan?`
+        );
+        if (!proceed) return;
+      }
+
+      const [{ fetchReportImages }, { buildClashReportWorkbook }, { downloadWorkbook, reportFilename }, { monthLabel }, ExcelJSModule] =
+        await Promise.all([
+          import("@/lib/report/images"),
+          import("@/lib/report/workbook"),
+          import("@/lib/report/download"),
+          import("@/lib/report/layout"),
+          import("exceljs"),
+        ]);
+
+      const { images, failed } = await fetchReportImages({
+        rows: res.data,
+        onProgress: (done, total) => setReportProgress({ done, total }),
+        signal: controller.signal,
+      });
+
+      if (controller.signal.aborted) {
+        setExportError("Export dibatalkan.");
+        return;
+      }
+
+      setReportProgress(null);
+      const workbook = buildClashReportWorkbook(
+        ExcelJSModule.default ?? ExcelJSModule,
+        res.data,
+        images,
+        {
+          projectName: project.nama,
+          monthLabel: monthLabel(filters.cf, filters.ct),
+          zoneOrder: zones.map((z) => z.level),
+        }
+      );
+
+      const bytes = await downloadWorkbook(workbook, reportFilename(project.kode));
+
+      const untagged = res.data.filter((r) => !r.original && !r.clashDetection).length;
+      const parts = [
+        `${res.data.length} baris`,
+        `${images.size} gambar tertanam`,
+        // Laporan tanpa gambar bisa hanya puluhan KB; "0.0 MB" terbaca
+        // seperti file gagal dibuat.
+        bytes < 1024 * 1024
+          ? `${Math.round(bytes / 1024)} KB`
+          : `${(bytes / 1024 / 1024).toFixed(1)} MB`,
+      ];
+      if (failed.length > 0) parts.push(`${failed.length} gambar gagal dimuat`);
+      if (untagged > 0) parts.push(`${untagged} clash belum ditandai lampirannya`);
+      setReportSummary(parts.join(" · "));
+    } catch (error) {
+      if (controller.signal.aborted) setExportError("Export dibatalkan.");
+      else if (error instanceof ApiError && error.status === 404) {
+        setExportError("Fitur laporan clash sedang dimatikan.");
+        setReportEnabled(false);
+      } else {
+        setExportError("Gagal membuat laporan. Periksa koneksi dan coba lagi.");
+      }
+    } finally {
+      reportAbortRef.current = null;
+      setReportProgress(null);
+      setIsExporting(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-7xl px-6 py-8">
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
@@ -525,6 +660,17 @@ export function RegisterView() {
           >
             {isExporting ? "Mengekspor…" : "Export PDF"}
           </button>
+          {reportEnabled && (
+            <button
+              type="button"
+              onClick={handleExportReport}
+              disabled={isExporting}
+              title="Format konsultan: dikelompokkan per lantai, dengan kolom gambar Original dan Clash Detection"
+              className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-40"
+            >
+              {isExporting ? "Mengekspor…" : "Export Laporan Clash"}
+            </button>
+          )}
           {user.peran !== "Management" && (
             <Link
               href="/clashes/new"
@@ -638,6 +784,37 @@ export function RegisterView() {
 
       {exportError && (
         <p className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{exportError}</p>
+      )}
+
+      {/* Determinate, bukan spinner: pengguna berhak tahu apakah ini 10 detik
+          atau 3 menit sebelum memutuskan menunggu. */}
+      {reportProgress && (
+        <div className="mb-4 flex items-center gap-3 rounded-lg bg-zinc-50 px-3 py-2 text-sm text-zinc-600">
+          <span>
+            Mengambil gambar {reportProgress.done}/{reportProgress.total}…
+          </span>
+          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-200">
+            <div
+              className="h-full rounded-full bg-zinc-700 transition-all"
+              style={{
+                width: `${reportProgress.total ? (reportProgress.done / reportProgress.total) * 100 : 0}%`,
+              }}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => reportAbortRef.current?.abort()}
+            className="shrink-0 text-xs font-semibold text-zinc-500 hover:text-red-600"
+          >
+            Batal
+          </button>
+        </div>
+      )}
+
+      {reportSummary && (
+        <p className="mb-4 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+          Laporan selesai — {reportSummary}
+        </p>
       )}
 
       {fetchError && (
