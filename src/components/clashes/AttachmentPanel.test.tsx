@@ -34,6 +34,7 @@ const ATTACHMENT: Attachment = {
   ukuranBytes: 2048,
   uploadedBy: "u-eng-1",
   createdAt: "2026-01-01T00:00:00.000Z",
+  role: "OTHER",
 };
 
 function renderPanel(overrides: Partial<Parameters<typeof AttachmentPanel>[0]> = {}) {
@@ -147,5 +148,62 @@ describe("AttachmentPanel", () => {
   it('shows "Belum ada lampiran" when the list is empty', () => {
     renderPanel({ attachments: [] });
     expect(screen.getByText("Belum ada lampiran.")).toBeInTheDocument();
+  });
+});
+
+describe("AttachmentPanel — peran laporan", () => {
+  it("tidak menampilkan picker sama sekali tanpa onRoleChange", () => {
+    renderPanel();
+    expect(screen.queryByLabelText(/Peran laporan/)).not.toBeInTheDocument();
+  });
+
+  it("menampilkan picker untuk lampiran milik sendiri dan mengirim peran terpilih", () => {
+    const onRoleChange = vi.fn(() => Promise.resolve());
+    renderPanel({ onRoleChange });
+
+    const select = screen.getByLabelText("Peran laporan untuk foto.png");
+    expect(select).toHaveValue("OTHER");
+
+    fireEvent.change(select, { target: { value: "ORIGINAL" } });
+    expect(onRoleChange).toHaveBeenCalledWith("att-1", "ORIGINAL");
+  });
+
+  it("hanya menampilkan badge, bukan picker, untuk unggahan orang lain", () => {
+    // Aturan yang sama dengan hapus: Engineer hanya boleh mengelola
+    // lampirannya sendiri (canManageAttachment).
+    const onRoleChange = vi.fn(() => Promise.resolve());
+    renderPanel({
+      attachments: [{ ...ATTACHMENT, uploadedBy: "u-eng-2", role: "ORIGINAL" }],
+      onRoleChange,
+    });
+
+    expect(screen.queryByLabelText(/Peran laporan/)).not.toBeInTheDocument();
+    expect(screen.getByText("Original")).toBeInTheDocument();
+  });
+
+  it("tidak menampilkan badge apa pun untuk lampiran orang lain yang belum ditandai", () => {
+    renderPanel({
+      attachments: [{ ...ATTACHMENT, uploadedBy: "u-eng-2", role: "OTHER" }],
+      onRoleChange: vi.fn(() => Promise.resolve()),
+    });
+
+    // "Lainnya" bukan informasi — hanya peran yang benar-benar dipilih layak
+    // memakan ruang di kartu.
+    expect(screen.queryByText("Lainnya")).not.toBeInTheDocument();
+  });
+
+  it("Coordinator boleh menandai lampiran siapa pun", () => {
+    const onRoleChange = vi.fn(() => Promise.resolve());
+    renderPanel({
+      attachments: [{ ...ATTACHMENT, uploadedBy: "u-eng-2" }],
+      userRole: "Coordinator",
+      userId: "u-coord",
+      onRoleChange,
+    });
+
+    fireEvent.change(screen.getByLabelText("Peran laporan untuk foto.png"), {
+      target: { value: "CLASH_DETECTION" },
+    });
+    expect(onRoleChange).toHaveBeenCalledWith("att-1", "CLASH_DETECTION");
   });
 });

@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import { z } from "zod";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
-import { formatBytes } from "@/lib/lookup";
+import { ATTACHMENT_ROLE_LABEL, formatBytes } from "@/lib/lookup";
+import type { AttachmentRole } from "@/lib/types";
 import { MAX_FILES, MAX_FILE_MB, validateAttachmentFile } from "@/lib/attachments";
 
 const clashSchema = z.object({
@@ -23,7 +24,11 @@ type FormErrors = Partial<Record<keyof FormValues, string>>;
 interface PendingFile {
   file: File;
   error?: string;
+  /** Kolom laporan yang akan diisi file ini. OTHER = tidak masuk laporan. */
+  role: AttachmentRole;
 }
+
+const ROLE_OPTIONS: AttachmentRole[] = ["OTHER", "ORIGINAL", "CLASH_DETECTION"];
 
 export default function NewClashPage() {
   const { user, isLoading } = useRequireAuth();
@@ -71,7 +76,7 @@ export default function NewClashPage() {
       const combined = [...prev];
       for (const file of incoming) {
         if (combined.length >= MAX_FILES) break;
-        combined.push({ file, error: validateAttachmentFile(file) });
+        combined.push({ file, error: validateAttachmentFile(file), role: "OTHER" });
       }
       return combined;
     });
@@ -114,6 +119,7 @@ export default function NewClashPage() {
             tipe: f.file.type === "application/pdf" ? "pdf" : "image",
             ukuranBytes: f.file.size,
             file: f.file,
+            role: f.role,
           })),
         },
         reporterId
@@ -317,6 +323,29 @@ export default function NewClashPage() {
                       {f.error ?? formatBytes(f.file.size)}
                     </p>
                   </div>
+                  {/* Peran laporan bisa ditandai sekarang atau nanti di
+                      halaman detail — file bermasalah tidak akan terkirim,
+                      jadi picker-nya disembunyikan. */}
+                  {!f.error && (
+                    <select
+                      aria-label={`Peran laporan untuk ${f.file.name}`}
+                      value={f.role}
+                      onChange={(e) =>
+                        setFiles((prev) =>
+                          prev.map((p, i) =>
+                            i === idx ? { ...p, role: e.target.value as AttachmentRole } : p
+                          )
+                        )
+                      }
+                      className="ml-3 shrink-0 rounded border border-zinc-200 bg-white px-1.5 py-1 text-xs text-zinc-600"
+                    >
+                      {ROLE_OPTIONS.map((r) => (
+                        <option key={r} value={r}>
+                          {ATTACHMENT_ROLE_LABEL[r]}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                   <button
                     type="button"
                     onClick={() => removeFile(idx)}

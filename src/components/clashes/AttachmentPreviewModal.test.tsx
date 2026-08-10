@@ -56,6 +56,7 @@ const IMAGE: Attachment = {
   ukuranBytes: 2048,
   uploadedBy: "u1",
   createdAt: "2026-01-01T00:00:00.000Z",
+  role: "OTHER",
 };
 
 const PDF: Attachment = {
@@ -66,6 +67,7 @@ const PDF: Attachment = {
   ukuranBytes: 4096,
   uploadedBy: "u1",
   createdAt: "2026-01-01T00:00:00.000Z",
+  role: "OTHER",
 };
 
 const USER: User = {

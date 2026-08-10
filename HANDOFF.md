@@ -493,6 +493,28 @@ Anotasi **sengaja bukan bagian dari `data-context.tsx`** — state lokal modal (
 - `useElementBox` memicu *"Maximum update depth exceeded"* — `setState` di efek tanpa dependency array yang benar (lihat bug 16a).
 - **Markup teks TIDAK BISA DIKETIK SAMA SEKALI dengan mouse sungguhan**, meski semua unit test (termasuk yang khusus dibuat utk memverifikasi ini) lolos hijau — event sintetis (`dispatchEvent`) yang dipakai testing tidak meniru *default action* browser, dan justru default action itulah sumber bugnya (`mousedown` memindah fokus ke `<body>` setelah React memasang input, lihat bug 16b). **Pelajaran paling mahal di update ini**: fitur interaktif berbasis pointer/mouse (drag, klik-ganda, gambar bebas) HARUS diverifikasi dengan `computer` tool (klik/ketik sungguhan) di Browser pane, bukan cuma `javascript_tool`'s `dispatchEvent` atau unit test — keduanya bisa lolos hijau di atas fitur yang benar-benar rusak.
 
+### Export Laporan Clash — format konsultan (update ke-17)
+
+Permintaan ad-hoc: user mengirim tangkapan layar laporan konsultan ("Tabel Clash Detection") dan bertanya apakah export bisa mengikuti format itu — baris judul ter-merge, dikelompokkan per lantai (`Floor: Basement 2 Plan`), dan **dua kolom gambar** per baris (Original + Clash Detection) dengan markup merah tercetak di gambarnya.
+
+Tiga hal menghalangi, dan ketiganya harus diselesaikan lebih dulu:
+
+1. **`xlsx@0.18.5` (SheetJS community) tidak bisa menanam gambar sama sekali.** Ditambahkan `exceljs` — library yang justru sudah disebut sejak awal di `ClashHub_PRD.md` dan `ClashHub_Sprint_Plan.md`, jadi SheetJS-lah yang menyimpang dari rencana. Di-import dinamis (~280 KB gz) mengikuti pola pdf.js. **Temuan Gate 0**: pakai `base64`, bukan `buffer` — tipe `Image.buffer` milik ExcelJS adalah `Buffer` Node yang tidak ada di browser; `extension` hanya menerima `'jpeg' | 'png' | 'gif'`, bukan `'jpg'`; field `browser` di package-nya dihormati Turbopack jadi tidak perlu fallback ke `dist/exceljs.min.js`.
+2. **Tidak ada cara membedakan lampiran "Original" dari "Clash Detection".** Ditambahkan enum `AttachmentRole` + kolom `Attachment.role` (DEFAULT `OTHER`), dengan picker "Kolom laporan" di `AttachmentPanel` dan di halaman clash baru. Lihat gotcha 37 soal kenapa tidak ada fallback implisit.
+3. **Kolom "Resolve (TATA Proposed)" dan "Resolve by Consultant" tidak punya tempat.** Ditambahkan dua kolom teks nullable di `Clash`, dengan section "Penyelesaian" di halaman detail. `Resolve Date` memakai `closedAt` yang sudah ada. RBAC: Engineer boleh mengisi usulan TATA tapi **tidak** jawaban konsultan — transkripsi tangan kedua adalah cara laporan salah mengutip pihak eksternal.
+
+**Arsitektur: dibangun di client, bukan di server.** Alasannya bukan selera: `src/lib/annotations.ts` sudah menyatakan bahwa geometri ternormalisasi dipakai bersama SVG overlay dan canvas flattener "so the two can never drift". Renderer server-side akan jadi renderer **ketiga** dengan matematika arrowhead/stroke/font sendiri. Ditambah lampiran PDF: browser sudah bisa merendernya lewat pdf.js, server butuh native canvas module di Docker + Windows. `loadImage`/`drawAnnotationsOnCanvas` diekstrak dari `AttachmentPreviewModal` ke `src/lib/markup-flatten.ts` supaya "Unduh dengan markup" dan laporan memakai renderer yang sama persis — `AttachmentPreviewModal.test.tsx` lulus **tanpa diubah satu baris pun**, itu bukti ekstraksinya behavior-preserving.
+
+**API**: `GET /clashes/report` (selalu **empat** query berapa pun jumlah baris — pencarian lampiran dan anotasi di-batch dengan `in`, ada test yang mematoknya), cap 300 baris (bukan 5000 seperti `/export`, karena satu baris berarti sampai dua unduhan gambar), TTL signed URL 15 menit (bukan 5 — export 300 baris bisa lebih lama, dan URL kedaluwarsa di tengah jalan jadi lubang di spreadsheet). Plus `GET /clashes/report/capability` supaya Register tahu harus merender tombolnya atau tidak.
+
+**Kill switch `CLASH_REPORT_ENABLED`** (Joi, default true): setel false lalu restart API — tombolnya hilang dari Register dan endpoint membalas 404 (bukan 403; fitur yang dimatikan sebaiknya tampak tidak ada). Diverifikasi dua arah lewat UI, termasuk regresi bahwa kedua export lama tetap berfungsi saat fitur baru mati. Lihat §13 untuk empat lapis rollback.
+
+**Dua bug yang hanya ketahuan dari uji browser**, keduanya lolos typecheck/build/semua unit test:
+- **CSP `img-src 'self' data:` memblokir `blob:`** — versi pertama `report/images.ts` mengunduh lampiran jadi Blob lalu memasang object URL-nya ke `img.src`, hasilnya "0 gambar tertanam, 2 gagal" tanpa exception apa pun. Diperbaiki dengan memakai signed URL same-origin apa adanya alih-alih melonggarkan CSP — kebetulan juga menghemat satu fetch penuh per gambar. Lihat gotcha 36.
+- **Picker peran terhimpit jadi "Ori…"/"Clas…"** di kartu lampiran grid dua kolom, karena disusun sebaris dengan nama file dan tombol aksi. Kartu diubah jadi kolom. Tidak ada unit test yang bisa menangkap ini.
+
+**Diverifikasi**: file `laporan-clash-JTB-2026-08-10.xlsx` (47.169 byte) benar-benar terunduh dari data asli lalu dibuka kembali dengan ExcelJS — judul, label bulan, kesembilan header, band `Floor:` di baris yang benar, 2 JPEG di `xl/media` dengan anchor `col=1 row=4 editAs=oneCell`, tinggi baris 112,5 pt, header beku, landscape `fitToWidth=1`.
+
 ---
 
 ## 6. RBAC yang ditegakkan
@@ -625,6 +647,16 @@ c. **Prisma `ClashUpdateInput` (checked) tidak mengekspos field FK skalar** keti
 33. **Ada instalasi PostgreSQL 16 native Windows (service `postgresql-x64-16`, `C:\Program Files\PostgreSQL\16`) yang ikut listen di port 5432**, terpisah dari container `clashhub-postgres` yang dibuat `docker-compose.yml`. Karena keduanya bind ke `0.0.0.0:5432`/`::1:5432`, koneksi `localhost:5432` dari proses Node/Prisma di Windows host mendarat di service native itu, BUKAN di container Docker — container-nya kosong (`\dt` di dalamnya nol tabel) sementara data proyek yang sesungguhnya (seed + histori manual) ada di service native. Kalau `docker exec clashhub-postgres psql ...` menunjukkan tabel kosong padahal `prisma migrate status` bilang "up to date", ini penyebabnya — cek data lewat `psql` native (`"C:\Program Files\PostgreSQL\16\bin\psql.exe" -h localhost -U clashuser -d clashhub_db`), bukan lewat `docker exec`. Belum diperbaiki (di luar cakupan sesi ini); kalau mau menyelaraskan dengan alur `docker compose` yang didokumentasikan di §10, salah satu dari keduanya harus dimatikan atau port-nya diubah.
 34. **`pg_advisory_xact_lock(int4, int4)` butuh KEDUA argumen persis `int4` — literal angka JS biasa lewat Prisma tagged-template raw query dikirim sebagai `bigint`, bukan `int4`, dan gagal runtime dengan error `42883` (`function ... does not exist`) yang TIDAK ketahuan oleh test unit manapun** karena semua test memock `$executeRaw`/`$queryRaw` sepenuhnya — hanya ketahuan lewat klik manual di browser sungguhan yang menembak Postgres asli (lihat `clash-code.ts` `lockDiscipline()`, ditemukan & diperbaiki saat verifikasi fitur arsip-proyek/rename-cascade/gap-fill: `restore()` gagal 500 di browser padahal 63 test clashes.service.spec.ts hijau semua). **Pelajaran wajib**: kalau raw SQL Prisma memanggil fungsi Postgres dengan overload sempit (banyak fungsi built-in cuma punya varian `int4`/`int8` tertentu, bukan keduanya), selalu cast eksplisit tipe tiap parameter (`${x}::int4`) alih-alih mengandalkan inferensi tipe Prisma — dan verifikasi lewat DB nyata (browser/`psql`), bukan cuma test bermock, untuk kode yang isi query-nya memanggil fungsi Postgres spesifik (bukan cuma `SELECT`/`UPDATE` generik).
 
+35. **`apps/api/scripts/backup-db.sh` MENGHASILKAN BACKUP KOSONG di mesin dev ini, dan tetap melaporkan sukses.** Konsekuensi langsung dari gotcha 33: skrip itu `docker exec clashhub-postgres pg_dump`, sedangkan data sesungguhnya ada di PostgreSQL native Windows. Dump-nya valid secara format tapi berisi nol tabel — dan itu baru ketahuan saat Anda mencoba restore, yaitu momen terburuk untuk menemukannya. **Selama gotcha 33 belum diselesaikan, backup dev harus lewat binary native:**
+    ```bash
+    "C:/Program Files/PostgreSQL/16/bin/pg_dump.exe" -U clashuser -h localhost -F c \
+      -f backups/nama.dump clashhub_db
+    "C:/Program Files/PostgreSQL/16/bin/pg_restore.exe" -l backups/nama.dump | head   # WAJIB verifikasi
+    ```
+    Backup yang tidak diverifikasi bukan backup. `pg_dump` juga tidak menyertakan file di `apps/api/uploads/` — DB dan lampiran harus di-backup berpasangan, kalau tidak restore meninggalkan baris `Attachment` yang menunjuk file hilang.
+36. **CSP aplikasi ini adalah `img-src 'self' data:` — `blob:` TIDAK diizinkan.** Setiap kode yang mengambil gambar lalu memasangnya ke `img.src` harus memakai URL same-origin (`/api/...`) atau `data:` URI, bukan `URL.createObjectURL()`. Browser memblokirnya diam-diam: tidak ada exception yang tertangkap, hanya `onerror` — jadi lolos typecheck, lolos build, dan lolos semua unit test. Ditemukan saat verifikasi browser fitur laporan clash (`src/lib/report/images.ts` versi pertama menghasilkan "0 gambar tertanam, 2 gagal"). Sebelum melonggarkan CSP di `next.config.ts`, pertimbangkan dulu apakah URL same-origin bisa dipakai langsung — di kasus itu ternyata bisa, dan malah menghemat satu fetch penuh per gambar.
+37. **Peran lampiran (`Attachment.role`) menentukan isi dokumen yang dikirim KE LUAR perusahaan, dan sengaja tidak punya fallback.** Clash tanpa lampiran ber-`ORIGINAL`/`CLASH_DETECTION` menghasilkan sel gambar kosong di laporan — bukan "ambil saja lampiran pertama". Foto yang salah di laporan konsultan jauh lebih merugikan daripada sel kosong, dan ringkasan export menghitung berapa clash yang belum ditandai supaya kekosongan itu bisa dijelaskan. Kalau satu clash punya beberapa lampiran dengan peran sama, yang `createdAt`-nya terbaru menang (`ClashesService.report()`).
+
 ---
 
 ## 10. Menjalankan & verifikasi
@@ -654,7 +686,10 @@ npm run dev                            # Web → http://localhost:3000
 Pemeriksaan:
 
 ```bash
-npm run build && npm run lint && npm test   # frontend — build+lint+120 test/10 file (naik dari 57/5,
+npm run build && npm run lint && npm test   # frontend — build+lint+192 test/16 file (update ke-17:
+                                             # +report/layout, +report/workbook (termasuk round-trip
+                                             # xlsx), +report/images, +markup-flatten, +AttachmentPanel
+                                             # peran laporan). Sebelumnya 120/10 (update ke-16:
                                              # update ke-16: +DeleteClashDialog, +AttachmentPanel,
                                              # +AttachmentPreviewModal, +AnnotationLayer, +annotations.ts,
                                              # +lookup diperluas). Build juga memvalidasi worker pdfjs-dist
@@ -664,7 +699,9 @@ npm --prefix apps/api run build             # backend
 npm --prefix apps/api run lint              # backend lint (sejak update ke-10, lihat §1) — 0 error,
                                              # warning bawaan tidak berubah (fast-xml-parser + supertest
                                              # untyped) meski cakupan lint bertambah lewat modul anotasi
-npm --prefix apps/api test                  # 190 unit+e2e test/18 suite (naik dari 147/17, update ke-16:
+npm --prefix apps/api test                  # 301 unit+e2e test/26 suite (update ke-17: +report() termasuk
+                                             # regresi N+1, +kill switch, +updateAttachmentRole,
+                                             # +kolom resolve/RBAC). Sebelumnya 190/18 (update ke-16:
                                              # +annotations.service.spec.ts baru, +storage.service.spec.ts
                                              # (delete), +clashes.service.spec.ts (soft-delete/restore/
                                              # deleteAttachment), +overdue-scanner & notifications-processor
@@ -779,7 +816,22 @@ Migrasi Prisma **tidak otomatis reversible** — `prisma migrate deploy` tidak p
 2. **Kalau migrasi baru SUDAH dijalankan** dan perlu rollback aplikasi: **jangan** downgrade image ke versi lama tanpa juga menangani skema — kode lama tidak tahu kolom/tabel baru dan mungkin akan error di query yang menyentuhnya (atau lebih buruk, diam-diam salah). Opsi realistis:
    - Tulis migrasi "forward" baru yang membatalkan efeknya (bukan `migrate down`) — pendekatan yang lebih aman dan yang direkomendasikan Prisma sendiri.
    - Atau restore dari backup (`scripts/backup-db.sh`, lihat di bawah) kalau rollback-nya darurat dan kehilangan data sejak backup terakhir bisa diterima.
-3. Backup **sebelum** menjalankan migrasi produksi apa pun — bukan opsional. `./apps/api/scripts/backup-db.sh` (default `CONTAINER=clashhub-postgres`; untuk stack produksi set `CONTAINER=clashhub-postgres-prod`, sudah didaftarkan di `docker-compose.prod.yml`).
+3. Backup **sebelum** menjalankan migrasi produksi apa pun — bukan opsional. `./apps/api/scripts/backup-db.sh` (default `CONTAINER=clashhub-postgres`; untuk stack produksi set `CONTAINER=clashhub-postgres-prod`, sudah didaftarkan di `docker-compose.prod.yml`). **Di mesin dev Windows ini skrip tersebut menghasilkan dump kosong — baca gotcha 35 sebelum mengandalkannya.**
+
+### Rollback fitur Export Laporan Clash (update ke-17)
+
+Fitur ini dirancang berlapis supaya pembatalan bisa dilakukan di tingkat termurah lebih dulu. Tag `pre-clash-report` menandai commit terakhir sebelum pengerjaannya.
+
+| Lapis | Cara | Kehilangan data? | Waktu |
+|---|---|---|---|
+| 1 | `CLASH_REPORT_ENABLED=false` di `apps/api/.env`, restart API | tidak | ~10 detik |
+| 2 | `git reset --hard pre-clash-report`, rebuild | tidak (kolom DB dibiarkan) | ~5 menit |
+| 3 | jalankan `apps/api/prisma/rollback/*_DOWN.sql` | ya — teks resolve + tag peran hilang | ~1 menit |
+| 4 | `pg_restore` dari dump pra-migrasi + kembalikan `uploads/` | ya — semua perubahan sejak backup | ~5 menit |
+
+**Lapis 2 hampir selalu cukup, dan ini poin yang penting**: ketiga kolom yang ditambahkan migrasi `20260809131501` bersifat aditif murni (`Attachment.role` NOT NULL dengan DEFAULT, dua kolom `Clash` nullable). Prisma Client meng-generate daftar kolom SELECT/INSERT eksplisit dari schema saat ia di-generate, jadi client versi lama tidak pernah menyebut kolom-kolom ini dan INSERT-nya tetap valid. **Dibuktikan empiris, bukan diasumsikan**: `INSERT INTO "Attachment" (...)` gaya-lama tanpa kolom `role` dijalankan terhadap skema baru dan berhasil, terisi `OTHER` lewat DEFAULT. Artinya kode boleh di-rollback tanpa harus ikut menurunkan skema — kebalikan dari peringatan umum di poin 2 di atas, yang berlaku untuk migrasi yang mengubah data.
+
+Lapis 3 (`prisma/rollback/`) sengaja diletakkan **di luar** `prisma/migrations/` supaya `migrate deploy` tidak pernah mengambilnya. Sudah diuji siklus turun-naik di DB salinan, bukan sekadar ditulis.
 
 ### Backup database
 

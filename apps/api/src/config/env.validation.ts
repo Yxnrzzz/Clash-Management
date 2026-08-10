@@ -77,4 +77,17 @@ export const envValidationSchema = Joi.object({
   // Optional: error tracking is a no-op when unset (see main.ts). Empty
   // string is treated the same as unset, not a validation failure.
   SENTRY_DSN: Joi.string().uri().allow('').optional(),
+
+  // Kill switch untuk fitur Export Laporan Clash (GET /clashes/report).
+  // Default true supaya deploy yang tidak menyetel apa pun tetap mendapat
+  // fiturnya; setel false lalu restart API untuk mematikannya dalam hitungan
+  // detik — tanpa rebuild frontend, tanpa menyentuh skema, tanpa kehilangan
+  // data (kolom Attachment.role dan Clash.resolve* tetap utuh, hanya tidak
+  // terpakai). Ini lapis rollback termurah untuk fitur tersebut.
+  //
+  // Didaftarkan di sini, bukan dibaca langsung lewat process.env seperti
+  // RELEASE/ALLOW_PRODUCTION_SEED, supaya nilai salah ketik ("flase", "0 ")
+  // menggagalkan boot dengan pesan jelas alih-alih diam-diam dianggap false
+  // dan mematikan fitur tanpa ada yang sadar.
+  CLASH_REPORT_ENABLED: Joi.boolean().default(true),
 });

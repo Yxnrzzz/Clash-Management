@@ -110,6 +110,12 @@ services:
       # be counted as its own X-Forwarded-For hop here. Re-verify if the
       # proxy chain in front of Caddy ever changes (e.g. adding a CDN).
       TRUSTED_PROXY_HOPS: 1
+      # Kill switch fitur Export Laporan Clash. Dibiarkan komentar karena
+      # default-nya sudah true (lihat env.validation.ts) — hilangkan komentar
+      # dan setel false lalu `docker compose up -d api` untuk mematikan
+      # fiturnya tanpa rebuild image, tanpa menyentuh database, dan tanpa
+      # kehilangan data yang sudah diisi pengguna.
+      # CLASH_REPORT_ENABLED: "false"
     # No published port — only reachable from other containers on this
     # compose network (web's rewrite target, and anyone running `docker
     # compose exec`). Publishing 3001 here bypassed both Caddy's TLS and

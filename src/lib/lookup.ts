@@ -1,4 +1,4 @@
-import type { Clash, Role, Status, User } from "./types";
+import type { AttachmentRole, Clash, Role, Status, User } from "./types";
 
 export function formatDate(iso: string | null) {
   if (!iso) return "-";
@@ -54,6 +54,20 @@ export function canDeleteAttachment(role: Role, uploadedById: string, userId: st
   if (role === "Engineer") return uploadedById === userId;
   return false;
 }
+
+/** Tagging which report column an attachment feeds decides what a consultant
+ * sees in the finished document, so it carries exactly the same rule as
+ * deleting one — mirrors assertCanManageAttachment() on the server. */
+export function canManageAttachment(role: Role, uploadedById: string, userId: string) {
+  return canDeleteAttachment(role, uploadedById, userId);
+}
+
+/** Label kolom laporan untuk sebuah peran lampiran. */
+export const ATTACHMENT_ROLE_LABEL: Record<AttachmentRole, string> = {
+  ORIGINAL: "Original",
+  CLASH_DETECTION: "Clash Detection",
+  OTHER: "Lainnya",
+};
 
 /** Markup is shared but only writable by roles that can already write
  * elsewhere — Management stays read-only, same as attachments/comments. */

@@ -1,9 +1,11 @@
 import { Transform, Type } from 'class-transformer';
+import { AttachmentRole } from '@prisma/client';
 import {
   ArrayMaxSize,
   ArrayMinSize,
   ArrayNotEmpty,
   IsArray,
+  IsEnum,
   IsIn,
   IsISO8601,
   IsInt,
@@ -11,6 +13,7 @@ import {
   IsString,
   IsUUID,
   Max,
+  MaxLength,
   Min,
   MinLength,
   ValidateIf,
@@ -91,6 +94,34 @@ export class UpdateClashDto {
   @ValidateIf((_, value) => value !== null)
   @IsISO8601(undefined, { message: 'Format tanggal tidak valid' })
   dueDate?: string | null;
+
+  // Dua kolom teks bebas laporan "Tabel Clash Detection". Null/"" berarti
+  // dikosongkan. Batas 2000 karakter: kolomnya TEXT tanpa batas di DB, tapi
+  // sel Excel dengan tinggi baris tetap akan memotong diam-diam jauh sebelum
+  // itu — lebih baik ditolak di sini daripada hilang tanpa jejak di laporan.
+  // Siapa boleh mengisi apa diputuskan di ClashesService.buildAllowedPatch()
+  // (Engineer hanya resolveProposed), bukan di sini.
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(2000, { message: 'Usulan penyelesaian maksimal 2000 karakter' })
+  resolveProposed?: string | null;
+
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(2000, { message: 'Jawaban konsultan maksimal 2000 karakter' })
+  resolveByConsultant?: string | null;
+}
+
+/**
+ * Sengaja TIDAK diikutkan ke BulkUpdatePatchDto: menimpa catatan
+ * penyelesaian yang berbeda-beda pada ratusan clash sekaligus dengan satu
+ * teks yang sama tidak punya makna yang masuk akal.
+ */
+export class UpdateAttachmentDto {
+  @IsEnum(AttachmentRole, { message: 'Peran lampiran tidak valid' })
+  role!: AttachmentRole;
 }
 
 export class BulkUpdatePatchDto {

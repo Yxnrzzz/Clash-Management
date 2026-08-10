@@ -23,6 +23,7 @@ import { ActiveProject } from '../common/decorators/active-project.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
+import { SkipProjectScope } from '../common/decorators/skip-project-scope.decorator';
 import { AuthUser } from '../auth/auth.types';
 import { UPLOAD_TMP_DIR } from '../storage/upload-tmp-dir';
 import {
@@ -31,6 +32,7 @@ import {
   CreateCommentDto,
   DashboardMetricsQueryDto,
   ListClashesQueryDto,
+  UpdateAttachmentDto,
   UpdateClashDto,
 } from './dto/clash.dto';
 import { ClashesService } from './clashes.service';
@@ -80,6 +82,33 @@ export class ClashesController {
     @CurrentUser() user: AuthUser,
   ) {
     return this.clashes.export(query, projectId, user);
+  }
+
+  /**
+   * Lets the Register decide whether to render the "Export Laporan Clash"
+   * button at all, instead of showing a button that 404s once
+   * CLASH_REPORT_ENABLED is flipped off. @SkipProjectScope() because the flag
+   * is process-wide — asking "is this feature on" needs no active project,
+   * and requiring one would break the probe on any page before a project is
+   * selected. Touches no database.
+   */
+  @SkipProjectScope()
+  @Get('report/capability')
+  reportCapability() {
+    return { enabled: this.clashes.isReportEnabled() };
+  }
+
+  // Same declaration-order rule as metrics/export above. Throttled harder
+  // than export (5/min vs 10): each response hands out signed URLs for up to
+  // 600 images that the browser is about to fetch.
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Get('report')
+  report(
+    @Query() query: ListClashesQueryDto,
+    @ActiveProject() projectId: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.clashes.report(query, projectId, user);
   }
 
   @Get(':id')
@@ -179,6 +208,24 @@ export class ClashesController {
       }
     }
     return this.clashes.addAttachments(id, files, user, projectId);
+  }
+
+  /**
+   * Deliberately separate from the multipart upload above rather than a
+   * parallel `roles` form field: matching a stringly-typed array against
+   * file order is a classic off-by-one, and the create-clash page can simply
+   * upload first and tag the ids it gets back.
+   */
+  @Roles(Role.ENGINEER, Role.COORDINATOR, Role.ADMIN)
+  @Patch(':clashId/attachments/:attachmentId')
+  updateAttachmentRole(
+    @Param('clashId') clashId: string,
+    @Param('attachmentId') attachmentId: string,
+    @Body() dto: UpdateAttachmentDto,
+    @CurrentUser() user: AuthUser,
+    @ActiveProject() projectId: string,
+  ) {
+    return this.clashes.updateAttachmentRole(clashId, attachmentId, dto.role, user, projectId);
   }
 
   @Roles(Role.ENGINEER, Role.COORDINATOR, Role.ADMIN)
