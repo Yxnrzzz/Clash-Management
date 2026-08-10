@@ -13,8 +13,11 @@ const loginSchema = z.object({
 
 type FieldErrors = Partial<Record<"email" | "password", string>>;
 
-/** Password shared by every seeded account (see apps/api/prisma/seed.ts). */
-const DEMO_PASSWORD = "demo1234";
+/** Password shared by every seeded account absent a SEED_PASSWORD override
+ * (see apps/api/prisma/seed.ts) — every seeded account also starts with
+ * mustChangePassword: true, so signing in here immediately routes to
+ * /settings/password before anything else is usable. */
+const DEMO_PASSWORD = "demo1234-local-dev-only";
 
 // Listed statically: the user list now comes from the API, which needs a
 // session — so there is nothing to read from before signing in.

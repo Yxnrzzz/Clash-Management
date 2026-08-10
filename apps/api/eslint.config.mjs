@@ -42,7 +42,12 @@ export default tseslint.config(
     },
   },
   {
-    files: ["**/*.spec.ts"],
+    // Matches "*.spec.ts" and "*.e2e-spec.ts" alike — a plain "**/*.spec.ts"
+    // glob requires a literal dot right before "spec", which "e2e-spec.ts"
+    // doesn't have (hyphen, not dot), so e2e specs were silently excluded
+    // from this relaxation. Same class of bug as the Jest testRegex fix in
+    // package.json — both defaults quietly never matched this file's name.
+    files: ["**/*.spec.ts", "**/*.e2e-spec.ts"],
     rules: {
       // Test doubles/mocks routinely need loose typing.
       "@typescript-eslint/no-unsafe-assignment": "off",

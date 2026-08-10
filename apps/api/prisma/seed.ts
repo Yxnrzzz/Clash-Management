@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Prisma, PrismaClient, Role } from '@prisma/client';
 import { hash } from '@node-rs/argon2';
+import { formatClashCode } from '../src/clashes/clash-code';
 
 const prisma = new PrismaClient();
 
@@ -15,7 +16,22 @@ const prisma = new PrismaClient();
  * makes both halves line up, and costs nothing once clashes move to the database.
  */
 
-const DEMO_PASSWORD = 'demo1234';
+// Seeding real user accounts against a production database would create
+// known-password logins for every seeded email — the exact hole this
+// project's hardening pass exists to close (see AuthService.changePassword,
+// UsersService.generateTemporaryPassword). `prisma db seed` must be run
+// only against dev/staging unless someone deliberately opts in.
+if (process.env.NODE_ENV === 'production' && process.env.ALLOW_PRODUCTION_SEED !== 'true') {
+  console.error(
+    'Menolak menjalankan seed: NODE_ENV=production. Set ALLOW_PRODUCTION_SEED=true untuk override yang disengaja.',
+  );
+  process.exit(1);
+}
+
+// No hardcoded fallback — a caller who wants demo data must say so
+// explicitly via SEED_PASSWORD rather than getting a password every
+// checkout of this repo already knows.
+const DEMO_PASSWORD = process.env.SEED_PASSWORD ?? 'demo1234-local-dev-only';
 
 const PROJECT = { id: 'proj-1', name: 'Menara Cendana — Tower A', code: 'MCA' };
 
@@ -175,14 +191,14 @@ async function seedClashes(projectCode: string) {
     const closedAt = status.isClosedState ? addDays(createdAt, 3 + Math.floor(rng() * 20)) : null;
 
     disciplineCounters[discipline.code] = (disciplineCounters[discipline.code] ?? 0) + 1;
-    const uniqueCode = `${projectCode}-${discipline.code}-${String(
-      disciplineCounters[discipline.code],
-    ).padStart(4, '0')}`;
+    const seq = disciplineCounters[discipline.code];
+    const uniqueCode = formatClashCode(projectCode, discipline.code, seq);
     const id = randomUUID();
 
     clashRows.push({
       id,
       uniqueCode,
+      seq,
       projectId: PROJECT.id,
       title: pick(rng, CLASH_TITLES),
       description: CLASH_DESCRIPTION,
@@ -277,13 +293,13 @@ async function seedProject2Clashes() {
     const id = randomUUID();
 
     disciplineCounters[discipline.code] = (disciplineCounters[discipline.code] ?? 0) + 1;
-    const uniqueCode = `${PROJECT_2.code}-${discipline.code}-${String(
-      disciplineCounters[discipline.code],
-    ).padStart(4, '0')}`;
+    const seq = disciplineCounters[discipline.code];
+    const uniqueCode = formatClashCode(PROJECT_2.code, discipline.code, seq);
 
     clashRows.push({
       id,
       uniqueCode,
+      seq,
       projectId: PROJECT_2.id,
       title: pick(rng, CLASH_TITLES),
       description: CLASH_DESCRIPTION,
@@ -340,11 +356,12 @@ async function main() {
 
   for (const user of USERS) {
     // passwordHash is left out of `update` so re-seeding never resets a password
-    // an admin may have changed.
+    // an admin may have changed. mustChangePassword is likewise create-only —
+    // once a real password has been set, reseeding must not re-trigger the gate.
     await prisma.user.upsert({
       where: { id: user.id },
       update: { name: user.name, email: user.email, role: user.role },
-      create: { ...user, passwordHash },
+      create: { ...user, passwordHash, mustChangePassword: true },
     });
 
     await prisma.projectMember.upsert({

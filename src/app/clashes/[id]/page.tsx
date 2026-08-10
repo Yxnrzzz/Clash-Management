@@ -2,17 +2,22 @@
 
 import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { useData } from "@/lib/data-context";
 import { useMasterDataLookups } from "@/lib/use-master-data";
-import { apiDownloadBlob } from "@/lib/api/client";
-import { canComment, canEditClash, formatBytes, formatDateTime, isAssignable } from "@/lib/lookup";
+import { apiGet } from "@/lib/api/client";
+import { canDeleteClash, canEditClash, formatDateTime, isAssignable } from "@/lib/lookup";
 import { PriorityBadge, StatusBadge, OverdueBadge } from "@/components/Badge";
+import { DeleteClashDialog } from "@/components/clashes/DeleteClashDialog";
+import { AttachmentPanel } from "@/components/clashes/AttachmentPanel";
+import { AttachmentPreviewModal } from "@/components/clashes/AttachmentPreviewModal";
 
 type Tab = "lampiran" | "komentar" | "riwayat";
 
 export default function ClashDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const router = useRouter();
   const { user, isLoading } = useRequireAuth();
   const {
     clashesById,
@@ -24,6 +29,9 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     updateClashField,
     addComment,
     loadClashDetail,
+    deleteClash,
+    uploadAttachments,
+    deleteAttachment,
   } = useData();
   const { priorities, disciplineById, zoneById, statusById, priorityById, userById, isOverdue, allowedStatusTransitions } =
     useMasterDataLookups();
@@ -33,6 +41,8 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
   const [actionError, setActionError] = useState<string | null>(null);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const previewUrlsRef = useRef<Record<string, string>>({});
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
 
   // Comments, audit log, and attachments are loaded lazily per clash — the
   // Register never needs them, only this detail page does.
@@ -41,9 +51,12 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loadClashDetail is stable; only re-run when the route id changes
   }, [id]);
 
-  // Fetches a blob preview URL for each attachment not already fetched.
-  // Unlike the old session-only object URLs, this re-fetches from the server
-  // on every mount, so previews survive a reload (see HANDOFF.md §5).
+  // Fetches a short-lived signed URL for each attachment not already
+  // fetched, and uses it directly as the <img>/<a> src — no auth headers
+  // needed for the browser to load it, and no blob object URL (or its
+  // matching revoke-on-unmount) to manage. Re-fetches on every mount, same
+  // as the old blob-fetch approach, so previews survive a reload (see
+  // HANDOFF.md §5); each url expires 5 minutes after being issued.
   useEffect(() => {
     const missing = attachments.filter(
       (a) => a.clashId === id && !previewUrlsRef.current[a.id]
@@ -54,8 +67,10 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     Promise.all(
       missing.map(async (a) => {
         try {
-          const blob = await apiDownloadBlob(`/clashes/${id}/attachments/${a.id}/download`);
-          return [a.id, URL.createObjectURL(blob)] as const;
+          const { url } = await apiGet<{ url: string }>(
+            `/clashes/${id}/attachments/${a.id}/signed-url`
+          );
+          return [a.id, `/api${url}`] as const;
         } catch {
           return null;
         }
@@ -72,13 +87,6 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
       cancelled = true;
     };
   }, [attachments, id]);
-
-  // Revoke every blob URL this page created, once, on unmount.
-  useEffect(() => {
-    return () => {
-      Object.values(previewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
-    };
-  }, []);
 
   if (isLoading || !user) {
     return <div className="p-8 text-sm text-zinc-500">Memuat…</div>;
@@ -131,16 +139,60 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
     }
   }
 
+  async function handleDeleteClash() {
+    setActionError(null);
+    try {
+      await deleteClash(clashId);
+      router.push("/register");
+    } catch {
+      setActionError("Gagal menghapus clash. Periksa koneksi dan coba lagi.");
+      setConfirmingDelete(false);
+    }
+  }
+
+  async function handleUploadAttachments(files: File[]) {
+    setActionError(null);
+    try {
+      await uploadAttachments(clashId, files);
+    } catch {
+      setActionError("Gagal mengunggah lampiran. Periksa koneksi dan coba lagi.");
+    }
+  }
+
+  async function handleDeleteAttachment(attachmentId: string) {
+    setActionError(null);
+    try {
+      await deleteAttachment(clashId, attachmentId);
+    } catch {
+      setActionError("Gagal menghapus lampiran. Periksa koneksi dan coba lagi.");
+    }
+  }
+
   function fieldLabel(field: string) {
-    return { assigneeId: "Assignee", priorityId: "Prioritas", dueDate: "Due Date", statusId: "Status" }[
-      field
-    ] ?? field;
+    return {
+      assigneeId: "Assignee",
+      priorityId: "Prioritas",
+      dueDate: "Due Date",
+      statusId: "Status",
+      uniqueCode: "Kode Unik",
+    }[field] ?? field;
   }
 
   function auditText(entry: (typeof auditLogs)[number]) {
     const actor = userById(entry.actorId)?.nama ?? "Sistem";
     if (entry.aksi === "created") return `${actor} membuat clash ini.`;
     if (entry.aksi === "imported") return `${actor} membuat clash ini lewat impor massal.`;
+    if (entry.aksi === "deleted") return `${actor} menghapus clash ini.`;
+    if (entry.aksi === "restored") return `${actor} memulihkan clash ini.`;
+    if (entry.aksi === "attachment_added") return `${actor} menambahkan lampiran "${entry.nilaiBaru}".`;
+    if (entry.aksi === "attachment_deleted") return `${actor} menghapus lampiran "${entry.nilaiLama}".`;
+    if (entry.aksi === "code_changed") {
+      return `Kode clash berubah dari "${entry.nilaiLama}" ke "${entry.nilaiBaru}" karena kode proyek atau disiplin diganti.`;
+    }
+    if (entry.aksi === "code_reassigned") {
+      return `${actor} memulihkan clash ini, tapi kode lamanya "${entry.nilaiLama}" sudah dipakai clash lain — kode baru "${entry.nilaiBaru}" diberikan.`;
+    }
+    if (!entry.field) return `${actor} melakukan aksi "${entry.aksi}".`;
     return `${actor} mengubah ${fieldLabel(entry.field ?? "").toLowerCase()} dari "${entry.nilaiLama}" ke "${entry.nilaiBaru}".`;
   }
 
@@ -204,51 +256,18 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
 
             <div className="p-5">
               {tab === "lampiran" && (
-                <>
-                  {clashAttachments.length === 0 ? (
-                    <p className="text-sm text-zinc-400">Belum ada lampiran.</p>
-                  ) : (
-                    <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      {clashAttachments.map((a) => {
-                        const previewUrl = previewUrls[a.id];
-                        return (
-                          <li
-                            key={a.id}
-                            className="flex items-center gap-3 rounded-lg border border-zinc-200 p-3"
-                          >
-                            {previewUrl && a.tipe === "image" ? (
-                              // eslint-disable-next-line @next/next/no-img-element -- object URL, next/image can't optimize blob: sources
-                              <img
-                                src={previewUrl}
-                                alt={a.namaFile}
-                                className="h-10 w-10 shrink-0 rounded-lg object-cover"
-                              />
-                            ) : (
-                              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-xs font-semibold uppercase text-zinc-500">
-                                {a.tipe}
-                              </div>
-                            )}
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-sm font-medium text-zinc-700">{a.namaFile}</p>
-                              <p className="text-xs text-zinc-400">
-                                {formatBytes(a.ukuranBytes)} · diunggah oleh {userById(a.uploadedBy)?.nama}
-                              </p>
-                            </div>
-                            {previewUrl && (
-                              <a
-                                href={previewUrl}
-                                download={a.namaFile}
-                                className="shrink-0 text-xs font-medium text-zinc-500 hover:text-zinc-900 hover:underline"
-                              >
-                                Unduh
-                              </a>
-                            )}
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                </>
+                <AttachmentPanel
+                  attachments={clashAttachments}
+                  previewUrls={previewUrls}
+                  userById={userById}
+                  userRole={user.peran}
+                  userId={user.id}
+                  onUpload={handleUploadAttachments}
+                  onDelete={handleDeleteAttachment}
+                  onPreview={(attachmentId) =>
+                    setPreviewIndex(clashAttachments.findIndex((a) => a.id === attachmentId))
+                  }
+                />
               )}
 
               {tab === "komentar" && (
@@ -268,34 +287,28 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
                     </div>
                   ))}
 
-                  {canComment(user.peran) ? (
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        if (!commentText.trim()) return;
-                        void handleAddComment(commentText.trim());
-                      }}
-                      className="flex items-start gap-2 pt-2"
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (!commentText.trim()) return;
+                      void handleAddComment(commentText.trim());
+                    }}
+                    className="flex items-start gap-2 pt-2"
+                  >
+                    <textarea
+                      value={commentText}
+                      onChange={(e) => setCommentText(e.target.value)}
+                      rows={2}
+                      placeholder="Tulis komentar…"
+                      className="flex-1 rounded-lg border border-zinc-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-zinc-300"
+                    />
+                    <button
+                      type="submit"
+                      className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800"
                     >
-                      <textarea
-                        value={commentText}
-                        onChange={(e) => setCommentText(e.target.value)}
-                        rows={2}
-                        placeholder="Tulis komentar…"
-                        className="flex-1 rounded-lg border border-zinc-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-zinc-300"
-                      />
-                      <button
-                        type="submit"
-                        className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800"
-                      >
-                        Kirim
-                      </button>
-                    </form>
-                  ) : (
-                    <p className="text-xs italic text-zinc-400">
-                      Peran Management bersifat baca-saja dan tidak dapat menambah komentar.
-                    </p>
-                  )}
+                      Kirim
+                    </button>
+                  </form>
                 </div>
               )}
 
@@ -437,8 +450,45 @@ export default function ClashDetailPage({ params }: { params: Promise<{ id: stri
               </p>
             )}
           </section>
+
+          {canDeleteClash(user.peran) && (
+            <section className="rounded-2xl border border-red-200 bg-red-50 p-5">
+              <h2 className="text-sm font-semibold text-red-700">Zona berbahaya</h2>
+              <p className="mt-2 text-sm text-red-600">
+                Clash akan disembunyikan dari Register, Dashboard, dan Clash Saya. Data tetap
+                tersimpan dan dapat dipulihkan.
+              </p>
+              <button
+                type="button"
+                onClick={() => setConfirmingDelete(true)}
+                className="mt-3 rounded-lg border border-red-300 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-100"
+              >
+                Hapus clash
+              </button>
+            </section>
+          )}
         </aside>
       </div>
+
+      {confirmingDelete && (
+        <DeleteClashDialog
+          kodeUnik={clash.kodeUnik}
+          onCancel={() => setConfirmingDelete(false)}
+          onConfirm={handleDeleteClash}
+        />
+      )}
+
+      {previewIndex !== null && clashAttachments[previewIndex] && (
+        <AttachmentPreviewModal
+          clashId={clashId}
+          attachments={clashAttachments}
+          index={previewIndex}
+          onIndexChange={setPreviewIndex}
+          onClose={() => setPreviewIndex(null)}
+          userById={userById}
+          currentUser={{ id: user.id, peran: user.peran }}
+        />
+      )}
     </div>
   );
 }

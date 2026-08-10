@@ -32,6 +32,13 @@ enum ImportJobStatus {
   FAILED
 }
 
+enum AnnotationKind {
+  RECT
+  ARROW
+  FREEHAND
+  TEXT
+}
+
 model User {
   id           String   @id @default(uuid())
   name         String
@@ -39,12 +46,27 @@ model User {
   passwordHash String
   role         Role
   isActive     Boolean  @default(true)
-  // Bumped on logout (and could be on password change). Refresh JWTs carry
-  // the version they were issued with; a mismatch means the token predates
-  // the last logout and is rejected even though its signature/exp are still
-  // valid — this is what makes logout actually invalidate stolen tokens
-  // instead of merely clearing the browser's cookie.
+  // Bumped on logout (and on password change — see AuthService.changePassword)
+  // and used as the emergency "sign out everywhere" lever. Refresh JWTs
+  // carry the version they were issued with; a mismatch means the token
+  // predates the last logout/password-change and is rejected even though
+  // its signature/exp are still valid. Day-to-day revocation of a single
+  // session is handled by RefreshSession below instead — this counter is
+  // for revoking every session at once.
   refreshTokenVersion Int      @default(0)
+  // True for every account created by an Admin without an explicit
+  // password, and set on the whole table by the migration that introduced
+  // this column (every pre-existing account shared the `demo1234` default).
+  // useRequireAuth() on the frontend redirects to /settings/password and
+  // refuses to render anything else while this is true.
+  mustChangePassword  Boolean   @default(false)
+  passwordChangedAt   DateTime?
+  // Counts consecutive failed login attempts; reset to 0 on a successful
+  // login. Distinct from the per-IP throttle on POST /auth/login — this
+  // bounds total attempts against ONE account regardless of how many
+  // source IPs a distributed attacker spreads across.
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -57,14 +79,44 @@ model User {
   notifications           Notification[]
   notificationPreference  NotificationPreference?
   importJobs              ImportJob[]
+  annotations             Annotation[]
+  refreshSessions         RefreshSession[]
+}
+
+/**
+ * One row per refresh token ever issued, so a refresh can be rotated (old
+ * token marked revoked, new one issued) and — critically — so a REUSE of an
+ * already-rotated token can be detected: that pattern means the token was
+ * stolen and used after the legitimate client had already moved on to its
+ * replacement. See AuthService.refresh(). tokenHash is sha256(token), never
+ * the raw token, so a leaked database dump doesn't hand out valid sessions.
+ */
+model RefreshSession {
+  id           String    @id @default(uuid())
+  userId       String
+  tokenHash    String    @unique
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  replacedById String?
+  createdAt    DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
 }
 
 model Project {
-  id        String   @id @default(uuid())
+  id        String    @id @default(uuid())
   name      String
-  code      String   @unique
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  code      String    @unique
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  // Soft archive (Admin only). Archived projects drop out of the switcher
+  // and GET /projects, and ProjectContextGuard rejects the X-Project-Id
+  // header for them (403 PROJECT_ARCHIVED). Distinct from hard delete
+  // (ProjectsService.remove), which is only allowed once a project has zero
+  // clashes — archiving is the reversible path for everything else.
+  archivedAt DateTime?
 
   members     ProjectMember[]
   disciplines Discipline[]
@@ -128,9 +180,22 @@ model Priority {
   clashes Clash[]
 }
 
+// Two partial unique indexes exist in the database but CANNOT be expressed
+// here — Prisma has no partial-index syntax: `Clash_uniqueCode_live_key`
+// (uniqueCode) and `Clash_disciplineId_seq_live_key` (disciplineId, seq),
+// both `WHERE "deletedAt" IS NULL`. Every `prisma migrate dev` will diff
+// this schema against the shadow DB and try to emit `DROP INDEX` for both —
+// delete those lines from the generated migration before applying it. See
+// HANDOFF.md gotcha list.
 model Clash {
   id           String    @id @default(uuid())
-  uniqueCode   String    @unique
+  uniqueCode   String
+  // Per-discipline sequence number. The source of truth for uniqueCode,
+  // which is purely derived: `${project.code}-${discipline.code}-${seq
+  // padded to 4}` (see ClashesService/clash-code.ts formatClashCode). Never
+  // parse uniqueCode to recover this — discipline codes have no charset
+  // validation and can legally contain "-".
+  seq          Int
   projectId    String
   title        String
   description  String
@@ -148,6 +213,18 @@ model Clash {
   // without colliding, while an imported row with a given external id can
   // never be created twice in the same project (see ImportProcessor).
   externalId   String?
+  // Soft delete (Admin only). Null = visible everywhere. A nullable
+  // timestamp rather than an `isActive` boolean like Discipline/Zone/Priority:
+  // those mean "retired from new selection, still visible in history" (a
+  // deactivated discipline still renders in the Register's filter chips),
+  // which is a different concept from "hidden everywhere". Unlike earlier
+  // revisions of this schema, uniqueCode/seq ARE freed on delete: a
+  // soft-deleted clash's code can be reused by a new clash in the same
+  // discipline (gap-filling allocator, see clash-code.ts), so both are only
+  // unique among deletedAt IS NULL rows. restore() checks whether the old
+  // code/seq is still free and, if not, allocates a fresh one at the end of
+  // the sequence and records the reassignment in AuditLog.
+  deletedAt    DateTime?
 
   project    Project    @relation(fields: [projectId], references: [id])
   discipline Discipline @relation(fields: [disciplineId], references: [id])
@@ -169,6 +246,8 @@ model Clash {
   @@index([projectId, statusId])
   @@index([projectId, assigneeId])
   @@index([projectId, dueDate])
+  @@index([projectId, deletedAt, createdAt])
+  @@index([uniqueCode])
   @@unique([projectId, externalId])
 }
 
@@ -184,6 +263,37 @@ model Attachment {
 
   clash      Clash @relation(fields: [clashId], references: [id])
   uploadedBy User  @relation(fields: [uploadedById], references: [id])
+
+  annotations Annotation[]
+
+  @@index([clashId])
+}
+
+/**
+ * Vector markup drawn over an attachment (image or PDF page) — never
+ * touches the original file. Geometry is stored normalized to [0,1] of the
+ * page's intrinsic box (see src/lib/annotations.ts on the frontend), so one
+ * mapping is exact at any zoom/viewport size. Shared: every project member
+ * sees every annotation; edit/delete is restricted to the author or
+ * Coordinator/Admin (see AnnotationsService).
+ */
+model Annotation {
+  id           String         @id @default(uuid())
+  attachmentId String
+  pageNumber   Int            @default(1) // always 1 for images
+  authorId     String
+  kind         AnnotationKind
+  geometry     Json
+  color        String         @default("#ef4444")
+  strokeWidth  Float          @default(0.004) // fraction of page WIDTH
+  text         String? // TEXT kind only
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  attachment Attachment @relation(fields: [attachmentId], references: [id])
+  author     User       @relation(fields: [authorId], references: [id])
+
+  @@index([attachmentId, pageNumber])
 }
 
 model Comment {

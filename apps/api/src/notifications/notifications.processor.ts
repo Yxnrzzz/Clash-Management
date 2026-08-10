@@ -50,8 +50,9 @@ export class NotificationsProcessor extends WorkerHost {
       this.prisma.clash.findUnique({ where: { id: clashId } }),
       this.prisma.notificationPreference.findUnique({ where: { userId } }),
     ]);
-    // Either was deleted between enqueue and processing — nothing to notify.
-    if (!user || !clash) return;
+    // Either was deleted between enqueue and processing — nothing to
+    // notify. Includes a clash soft-deleted after this job was enqueued.
+    if (!user || !clash || clash.deletedAt) return;
 
     const notificationType = TYPE_MAP[type];
     const subject = `[${clash.uniqueCode}] ${SUBJECT_BY_TYPE[type]}`;

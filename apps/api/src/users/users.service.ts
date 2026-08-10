@@ -1,35 +1,108 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from '../auth/auth.service';
+import { AuthUser } from '../auth/auth.types';
+import { CROSS_PROJECT_ROLES } from '../common/constants/project-roles';
 import { toUserView, UserView } from '../common/user.view';
 import { CreateUserDto, UpdateUserDto } from './dto/user.dto';
 
-/** Password given to accounts created from the Admin panel. */
-const DEFAULT_PASSWORD = 'demo1234';
+export interface CreatedUser extends UserView {
+  /** Only present when the Admin didn't supply a password — this is the
+   * caller's ONE chance to see it and hand it to the new user. Never stored
+   * anywhere or retrievable again after this response. */
+  temporaryPassword?: string;
+}
+
+export interface PasswordReset {
+  temporaryPassword: string;
+}
 
 @Injectable()
 export class UsersService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(): Promise<UserView[]> {
-    const users = await this.prisma.user.findMany({ orderBy: { createdAt: 'asc' } });
+  /**
+   * ADMIN/MANAGEMENT/COORDINATOR already see every project (CROSS_PROJECT_ROLES)
+   * and the Admin user-management page needs the full directory, so they get
+   * it here too. An Engineer is confined to their own projects everywhere
+   * else in the app — this used to return the entire org's directory
+   * (name/email/role) to any signed-in user regardless of role, which is
+   * exactly the kind of target list a credential-stuffing attempt wants.
+   * Scoped to "shares at least one project with the requester" rather than
+   * the caller's single active project, since this list feeds the Register's
+   * assignee picker before an active project may even be resolved and an
+   * Engineer can belong to more than one.
+   */
+  async findAll(requester: AuthUser): Promise<UserView[]> {
+    if (CROSS_PROJECT_ROLES.includes(requester.role)) {
+      const users = await this.prisma.user.findMany({ orderBy: { createdAt: 'asc' } });
+      return users.map(toUserView);
+    }
+
+    const memberships = await this.prisma.projectMember.findMany({
+      where: { userId: requester.id },
+      select: { projectId: true },
+    });
+    if (memberships.length === 0) return [];
+
+    const users = await this.prisma.user.findMany({
+      where: { projectMemberships: { some: { projectId: { in: memberships.map((m) => m.projectId) } } } },
+      orderBy: { createdAt: 'asc' },
+    });
     return users.map(toUserView);
   }
 
-  async create(dto: CreateUserDto): Promise<UserView> {
+  async create(dto: CreateUserDto): Promise<CreatedUser> {
     const email = dto.email.trim().toLowerCase();
     await this.assertEmailFree(email);
 
-    const passwordHash = await AuthService.hashPassword(dto.password ?? DEFAULT_PASSWORD);
+    const temporaryPassword = dto.password ?? generateTemporaryPassword();
+    const passwordHash = await AuthService.hashPassword(temporaryPassword);
     const user = await this.prisma.user.create({
-      data: { name: dto.name.trim(), email, role: dto.role, passwordHash },
+      data: { name: dto.name.trim(), email, role: dto.role, passwordHash, mustChangePassword: true },
     });
 
     // Multi-project: a new account starts with no project membership at all.
     // An Admin must assign it to specific projects via
     // POST /projects/:projectId/members (see ProjectsController).
-    return toUserView(user);
+    return {
+      ...toUserView(user),
+      ...(dto.password === undefined ? { temporaryPassword } : {}),
+    };
+  }
+
+  /**
+   * Admin-triggered reset: issues a new random password, forces the change
+   * gate, and revokes every live session for the account — the same
+   * "assume the old password/sessions may be compromised" posture as a
+   * self-service change (see AuthService.changePassword).
+   */
+  async resetPassword(id: string): Promise<PasswordReset> {
+    await this.getOrThrow(id);
+    const temporaryPassword = generateTemporaryPassword();
+    const passwordHash = await AuthService.hashPassword(temporaryPassword);
+
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id },
+        data: {
+          passwordHash,
+          mustChangePassword: true,
+          passwordChangedAt: new Date(),
+          refreshTokenVersion: { increment: 1 },
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      }),
+      this.prisma.refreshSession.updateMany({
+        where: { userId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+
+    return { temporaryPassword };
   }
 
   async update(id: string, dto: UpdateUserDto): Promise<UserView> {
@@ -64,4 +137,11 @@ export class UsersService {
       throw new ConflictException('Email sudah digunakan user lain');
     }
   }
+}
+
+/** 16 URL-safe characters (~96 bits of entropy) — always satisfies
+ * CreateUserDto's own MinLength(12) so an Admin-generated password never
+ * fails the policy it's exempt from typing in. */
+function generateTemporaryPassword(): string {
+  return randomBytes(12).toString('base64url');
 }

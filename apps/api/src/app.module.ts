@@ -3,8 +3,11 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { BullModule } from '@nestjs/bullmq';
 import { ScheduleModule } from '@nestjs/schedule';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 import { LoggerModule } from 'nestjs-pino';
+import type { IncomingMessage, ServerResponse } from 'http';
+import { resolveRequestId } from './common/request-id';
 import { PrismaModule } from './prisma/prisma.module';
 import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
@@ -17,6 +20,7 @@ import { ImportModule } from './import/import.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { ProjectContextGuard } from './common/guards/project-context.guard';
+import { UserThrottlerGuard } from './common/guards/user-throttler.guard';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { envValidationSchema } from './config/env.validation';
 
@@ -37,19 +41,46 @@ import { envValidationSchema } from './config/env.validation';
         // Never let request/response logs leak the refresh cookie or the
         // Authorization bearer token.
         redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'],
+        // Without this, pino-http's default req.id is a per-process
+        // incrementing integer — useless for tying a user-reported error
+        // back to a log line, since it resets on every restart and collides
+        // across replicas. Echoed back on the response so the client can
+        // surface it — see AllExceptionsFilter.
+        genReqId: (req: IncomingMessage, res: ServerResponse) => {
+          const id = resolveRequestId(req.headers['x-request-id']);
+          res.setHeader('X-Request-Id', id);
+          return id;
+        },
       },
     }),
     ScheduleModule.forRoot(),
-    // Global default, per IP. 100/min turned out to be too tight for real
-    // usage — a k6 run against the Register with just 10 virtual users
-    // tripped it within seconds (measured Sprint 11, see HANDOFF.md §12),
-    // and legitimate concurrent use (several engineers filtering/paginating
-    // at once, possibly behind the same office NAT) looks the same on the
-    // wire as a burst. 600/min (10 req/s) still meaningfully bounds
-    // scripted abuse without being indistinguishable from normal load.
-    // Routes that need a stricter ceiling (e.g. /auth/login) override it
-    // with @Throttle() — see auth.controller.ts.
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 600 }]),
+    // Global default, tracked per authenticated user (per IP for @Public()
+    // requests — see UserThrottlerGuard). 100/min turned out to be too
+    // tight for real usage — a k6 run against the Register with just 10
+    // virtual users tripped it within seconds (measured Sprint 11, see
+    // HANDOFF.md §12) — and legitimate concurrent use (several engineers
+    // filtering/paginating at once) looks the same on the wire as a burst.
+    // 600/min (10 req/s) still meaningfully bounds scripted abuse without
+    // being indistinguishable from normal load. Routes that need a
+    // stricter ceiling (e.g. /auth/login) override it with @Throttle() —
+    // see auth.controller.ts.
+    //
+    // Storage is Redis (the same instance BullMQ already connects to),
+    // not the package's in-memory default: an in-memory counter resets on
+    // every restart/deploy and isn't shared across replicas, so either
+    // gap would let a client simply outlast or outrun the limit.
+    ThrottlerModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        throttlers: [{ ttl: 60_000, limit: 600 }],
+        storage: new ThrottlerStorageRedisService({
+          host: config.get<string>('REDIS_HOST') ?? 'localhost',
+          port: config.get<number>('REDIS_PORT') ?? 6379,
+          password: config.get<string>('REDIS_PASSWORD') || undefined,
+        }),
+      }),
+    }),
     BullModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -57,6 +88,7 @@ import { envValidationSchema } from './config/env.validation';
         connection: {
           host: config.get<string>('REDIS_HOST') ?? 'localhost',
           port: config.get<number>('REDIS_PORT') ?? 6379,
+          password: config.get<string>('REDIS_PASSWORD') || undefined,
         },
       }),
     }),
@@ -71,12 +103,12 @@ import { envValidationSchema } from './config/env.validation';
     ImportModule,
   ],
   providers: [
-    // Order matters: JwtAuthGuard must populate request.user before RolesGuard
-    // reads the role off it, and ProjectContextGuard needs the role to decide
-    // whether membership is required. ThrottlerGuard runs first since it
-    // doesn't depend on any of them.
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // Order matters: JwtAuthGuard must run first and populate request.user
+    // before anything downstream reads it — UserThrottlerGuard needs it to
+    // track per-user instead of per-IP (see that guard's own comment), and
+    // RolesGuard/ProjectContextGuard need the role to decide what's allowed.
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: UserThrottlerGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
     { provide: APP_GUARD, useClass: ProjectContextGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

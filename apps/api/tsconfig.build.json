@@ -1,4 +1,13 @@
 {
   "extends": "./tsconfig.json",
-  "exclude": ["node_modules", "dist", "test", "prisma", "**/*spec.ts"]
+  // scripts/ (e.g. check-clash-seq.ts) is run directly via ts-node — see
+  // package.json's "check:clash-seq" — never through the compiled dist/
+  // output, so it doesn't belong in this build. Leaving it in matters more
+  // than "extra dead output": with no explicit rootDir, tsc infers the
+  // common ancestor of every included file, and scripts/ sitting next to
+  // src/ pushes that ancestor up one level — main.ts compiles to
+  // dist/src/main.js instead of dist/main.js, silently breaking the
+  // Dockerfile's `CMD ["node", "dist/main"]` (verified: building the prod
+  // image and inspecting it showed exactly this).
+  "exclude": ["node_modules", "dist", "test", "prisma", "scripts", "**/*spec.ts"]
 }

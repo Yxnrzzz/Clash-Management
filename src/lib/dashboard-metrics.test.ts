@@ -34,6 +34,7 @@ function makeClash(overrides: Partial<Clash>): Clash {
     dueDate: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     closedAt: null,
+    deletedAt: null,
     ...overrides,
   };
 }

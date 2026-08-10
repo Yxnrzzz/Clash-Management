@@ -8,12 +8,18 @@ export class EmailService {
   private readonly from: string;
 
   constructor(config: ConfigService) {
-    // No auth: matches MailHog's dev sandbox. A real SMTP provider would add
-    // `auth: { user, pass }` here from env vars.
+    const user = config.get<string>('SMTP_USER');
+    const pass = config.get<string>('SMTP_PASS');
+
     this.transporter = createTransport({
       host: config.get<string>('SMTP_HOST') ?? 'localhost',
       port: config.get<number>('SMTP_PORT') ?? 1025,
-      secure: false,
+      secure: config.get<boolean>('SMTP_SECURE') ?? false,
+      // Omitted entirely (not just left undefined) when unset — matches
+      // MailHog's dev sandbox, which rejects an AUTH attempt it never asked
+      // for. env.validation.ts requires SMTP_USER/PASS whenever
+      // NODE_ENV=production, so a real deploy can't end up here without them.
+      ...(user && pass ? { auth: { user, pass } } : {}),
     });
     this.from = config.get<string>('SMTP_FROM') ?? 'EPS Workspace <noreply@clashhub.dev>';
   }

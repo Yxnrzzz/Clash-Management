@@ -6,12 +6,14 @@ export interface User {
   email: string;
   peran: Role;
   isActive: boolean;
+  mustChangePassword: boolean;
 }
 
 export interface Project {
   id: string;
   nama: string;
   kode: string;
+  archivedAt: string | null;
 }
 
 export interface Discipline {
@@ -86,6 +88,7 @@ export interface Clash {
   dueDate: string | null;
   createdAt: string;
   closedAt: string | null;
+  deletedAt: string | null;
 }
 
 export interface NewClashInput {

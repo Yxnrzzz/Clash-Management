@@ -10,6 +10,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthUser } from '../auth/auth.types';
+import { NOT_DELETED } from './clash-scope';
+import { allocateLowestFreeSeq, allocateNextSeq, formatClashCode, lockDiscipline } from './clash-code';
 import {
   BulkUpdateClashDto,
   CreateClashDto,
@@ -22,6 +24,10 @@ import {
 type PatchableField = 'statusId' | 'priorityId' | 'assigneeId' | 'dueDate';
 type PatchValue = string | null | undefined;
 type Patch = Partial<Record<PatchableField, PatchValue>>;
+
+/** Hard ceiling on ClashesService.export() regardless of how many rows a
+ * filter set actually matches — see that method's comment. */
+const EXPORT_MAX_ROWS = 5000;
 
 interface Slice {
   id: string;
@@ -88,9 +94,19 @@ export class ClashesService {
    * A clash that exists but belongs to a different project is reported as
    * NotFound, not Forbidden, so callers can't use this to probe which ids
    * exist in projects they aren't scoped into.
+   *
+   * Soft-deleted clashes are excluded by default (404, same as a genuinely
+   * missing id) — pass `includeDeleted: true` only from restore(), the one
+   * place that legitimately needs to load a deleted row.
    */
-  private async assertClashInProject(clashId: string, projectId: string) {
-    const clash = await this.prisma.clash.findUnique({ where: { id: clashId } });
+  private async assertClashInProject(
+    clashId: string,
+    projectId: string,
+    opts?: { includeDeleted?: boolean },
+  ) {
+    const clash = await this.prisma.clash.findFirst({
+      where: { id: clashId, ...(opts?.includeDeleted ? {} : NOT_DELETED) },
+    });
     if (!clash || clash.projectId !== projectId) {
       throw new NotFoundException('Clash tidak ditemukan.');
     }
@@ -101,11 +117,16 @@ export class ClashesService {
 
   /**
    * Filters/sorts/paginates server-side — see RegisterView.tsx's FiltersState
-   * for the param shape this mirrors. pageSize can go up to 10000 (see the
-   * DTO), which is what lets the Register's export buttons reuse this same
-   * method (page=1&pageSize=10000) instead of a separate unpaginated route.
+   * for the param shape this mirrors.
+   *
+   * `query.deleted` switches from the normal (non-deleted) list to the
+   * trash bin — Admin only, since it's the only role that can restore.
    */
-  async list(query: ListClashesQueryDto, projectId: string) {
+  async list(query: ListClashesQueryDto, projectId: string, user: AuthUser) {
+    if (query.deleted && user.role !== Role.ADMIN) {
+      throw new ForbiddenException('Hanya Admin yang dapat melihat clash yang terhapus.');
+    }
+
     const where = this.buildListWhere(projectId, query);
     const orderBy = this.buildListOrderBy(query.sort, query.dir);
 
@@ -122,8 +143,36 @@ export class ClashesService {
     return { data, total };
   }
 
+  /**
+   * Same filters/sort as list() but unpaginated (up to EXPORT_MAX_ROWS) —
+   * backs the Register's Excel/PDF export buttons. Its own endpoint/method
+   * rather than list() with a huge pageSize (the old approach): that let one
+   * authenticated user repeatedly request the DB's most expensive possible
+   * page, and the row cap here is enforced server-side instead of trusting
+   * whatever pageSize the client sends. `total` may exceed the returned
+   * `data.length` if a filter set matches more than EXPORT_MAX_ROWS rows.
+   */
+  async export(query: ListClashesQueryDto, projectId: string, user: AuthUser) {
+    if (query.deleted && user.role !== Role.ADMIN) {
+      throw new ForbiddenException('Hanya Admin yang dapat melihat clash yang terhapus.');
+    }
+
+    const where = this.buildListWhere(projectId, query);
+    const orderBy = this.buildListOrderBy(query.sort, query.dir);
+
+    const [data, total] = await Promise.all([
+      this.prisma.clash.findMany({ where, orderBy, take: EXPORT_MAX_ROWS }),
+      this.prisma.clash.count({ where }),
+    ]);
+
+    return { data, total };
+  }
+
   private buildListWhere(projectId: string, query: ListClashesQueryDto): Prisma.ClashWhereInput {
-    const where: Prisma.ClashWhereInput = { projectId };
+    const where: Prisma.ClashWhereInput = {
+      projectId,
+      ...(query.deleted ? { deletedAt: { not: null } } : NOT_DELETED),
+    };
 
     if (query.disc?.length) where.disciplineId = { in: query.disc };
     if (query.stat?.length) where.statusId = { in: query.stat };
@@ -204,6 +253,7 @@ export class ClashesService {
     const clashes = await this.prisma.clash.findMany({
       where: {
         projectId,
+        ...NOT_DELETED,
         createdAt: { ...(start ? { gte: start } : {}), lte: end },
       },
       select: {
@@ -315,6 +365,13 @@ export class ClashesService {
 
   // --- Attachments ---------------------------------------------------------------
 
+  /**
+   * Reachable from any clash's detail page, not just at creation time —
+   * ENGINEER/COORDINATOR/ADMIN may attach files to any clash in their
+   * project. Deliberately does NOT call assertCanEdit(): unlike editing the
+   * clash's own fields, adding evidence isn't restricted to the
+   * assignee/reporter (see the PRD's attachment permission matrix).
+   */
   async addAttachments(
     clashId: string,
     files: Express.Multer.File[],
@@ -325,9 +382,9 @@ export class ClashesService {
 
     const created = [];
     for (const file of files) {
-      const { key } = await this.storage.save(file.buffer, clash.id, file.originalname);
-      created.push(
-        await this.prisma.attachment.create({
+      const { key } = await this.storage.saveFromPath(file.path, clash.id, file.originalname);
+      const attachment = await this.prisma.$transaction(async (tx) => {
+        const row = await tx.attachment.create({
           data: {
             clashId: clash.id,
             fileName: file.originalname,
@@ -336,8 +393,19 @@ export class ClashesService {
             sizeBytes: file.size,
             uploadedById: user.id,
           },
-        }),
-      );
+        });
+        await tx.auditLog.create({
+          data: {
+            clashId: clash.id,
+            actorId: user.id,
+            action: 'attachment_added',
+            field: 'attachment',
+            newValue: file.originalname,
+          },
+        });
+        return row;
+      });
+      created.push(attachment);
     }
     return created;
   }
@@ -346,17 +414,109 @@ export class ClashesService {
    * ProjectContextGuard already confirmed the caller may use `projectId`;
    * this just confirms the clash/attachment pair actually belongs to it, so
    * membership on Project A can't be used to pull an attachment id guessed
-   * or observed from Project B.
+   * or observed from Project B. Public so AnnotationsService can reuse it
+   * for the same scoping check rather than duplicating it.
    */
-  async getAttachmentForDownload(clashId: string, attachmentId: string, user: AuthUser, projectId: string) {
+  async assertAttachmentInClash(clashId: string, attachmentId: string, projectId: string) {
     await this.assertClashInProject(clashId, projectId);
 
     const attachment = await this.prisma.attachment.findUnique({ where: { id: attachmentId } });
     if (!attachment || attachment.clashId !== clashId) {
       throw new NotFoundException('Lampiran tidak ditemukan.');
     }
+    return attachment;
+  }
+
+  async getAttachmentForDownload(clashId: string, attachmentId: string, user: AuthUser, projectId: string) {
+    const attachment = await this.assertAttachmentInClash(clashId, attachmentId, projectId);
+    return { attachment, stream: this.storage.readStream(attachment.fileUrl) };
+  }
+
+  /**
+   * ENGINEER may delete only their own upload; COORDINATOR/ADMIN may delete
+   * anyone's — keyed on uploadedById, not assignee/reporter, so this is a
+   * distinct rule from assertCanEdit(). The DB row is hard-deleted (no
+   * deletedAt column on Attachment — see clashes.service.ts's Clash
+   * soft-delete for why that's a different situation): its only historical
+   * value is the filename, which the AuditLog row preserves. The on-disk
+   * file is unlinked after the transaction commits, fire-and-forget, so a
+   * storage hiccup never leaves the DB and disk disagreeing about whether
+   * the request "succeeded" — an orphaned file is harmless; a deleted row
+   * whose request 500s is not.
+   */
+  async deleteAttachment(clashId: string, attachmentId: string, user: AuthUser, projectId: string) {
+    const attachment = await this.assertAttachmentInClash(clashId, attachmentId, projectId);
+    this.assertCanDeleteAttachment(user, attachment.uploadedById);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.annotation.deleteMany({ where: { attachmentId: attachment.id } });
+      await tx.attachment.delete({ where: { id: attachment.id } });
+      await tx.auditLog.create({
+        data: {
+          clashId,
+          actorId: user.id,
+          action: 'attachment_deleted',
+          field: 'attachment',
+          oldValue: attachment.fileName,
+        },
+      });
+    });
+
+    this.storage
+      .delete(attachment.fileUrl)
+      .catch((error: Error) => this.logger.warn(`Gagal menghapus file lampiran: ${error.message}`));
+
+    return { id: attachment.id };
+  }
+
+  private assertCanDeleteAttachment(user: AuthUser, uploadedById: string) {
+    if (user.role === Role.COORDINATOR || user.role === Role.ADMIN) return;
+    if (user.role === Role.ENGINEER && uploadedById === user.id) return;
+    throw new ForbiddenException('Anda hanya dapat menghapus lampiran yang Anda unggah.');
+  }
+
+  /**
+   * Same RBAC/scoping as getAttachmentForDownload, but instead of streaming
+   * the file now, hands back a short-lived signed token the caller can use
+   * against the @Public() route below without carrying auth headers/cookies
+   * — the piece that matters once storage moves off local disk to S3/R2,
+   * where the browser would fetch bytes straight from the object store
+   * rather than proxying through this API. The token is bound to
+   * `attachmentId`, not the raw storage key, so the public route can look
+   * the attachment up by (indexed) id instead of trusting a client-supplied
+   * path — see streamBySignedToken().
+   */
+  async getAttachmentSignedUrl(clashId: string, attachmentId: string, user: AuthUser, projectId: string) {
+    const attachment = await this.assertAttachmentInClash(clashId, attachmentId, projectId);
+    const { token, expiresAt } = this.storage.signKey(this.signedUrlSubject(attachment.id));
+    return {
+      url: `/clashes/attachments/${attachment.id}/signed?token=${token}&expiresAt=${expiresAt}`,
+      expiresAt,
+    };
+  }
+
+  /**
+   * @Public() counterpart of getAttachmentSignedUrl — no user/project
+   * context available here (or trusted, if present), so authorization is
+   * entirely the signature: it proves this exact attachmentId+expiry was
+   * issued by getAttachmentSignedUrl above, nothing more (no revocation
+   * once issued, matching a normal short-TTL signed URL's guarantees).
+   */
+  async streamBySignedToken(attachmentId: string, token: string, expiresAt: number) {
+    const attachment = await this.prisma.attachment.findUnique({ where: { id: attachmentId } });
+    if (!attachment) throw new NotFoundException('Lampiran tidak ditemukan.');
+
+    if (!this.storage.verifySignedKey(this.signedUrlSubject(attachment.id), token, expiresAt)) {
+      throw new ForbiddenException('Tautan tidak valid atau sudah kedaluwarsa.');
+    }
 
     return { attachment, stream: this.storage.readStream(attachment.fileUrl) };
+  }
+
+  /** What actually gets signed — attachmentId, not the storage key itself,
+   * so a signed URL never reveals (or requires trusting) a filesystem path. */
+  private signedUrlSubject(attachmentId: string): string {
+    return `attachment:${attachmentId}`;
   }
 
   // --- Create ------------------------------------------------------------------
@@ -400,11 +560,22 @@ export class ClashesService {
    * and validating discipline/zone/priority/status first — this method only
    * owns generating the unique code and writing the Clash + AuditLog pair.
    *
-   * The unique code embeds a per-discipline sequence number. Two concurrent
-   * creates for the same discipline can race for the same number, so retry
-   * once on a uniqueCode collision with a freshly counted value. A collision
-   * on (projectId, externalId) is a different situation — it means this
-   * exact import row already exists — so it's surfaced as
+   * The code embeds a per-discipline sequence number (`seq`) allocated by
+   * allocateLowestFreeSeq, which fills gaps left by soft-deleted clashes —
+   * see the Clash.deletedAt doc comment in schema.prisma. Concurrent creates
+   * for the same discipline are serialized by an xact-scoped advisory lock
+   * (lockDiscipline) rather than left to retry alone: without the lock, N
+   * concurrent creates would all read the same gap, N-1 would fail on the
+   * partial unique index, and retrying would just re-read the same next gap
+   * again (O(N^2) wasted inserts, unbounded tail latency). The lock makes
+   * this O(N) with zero wasted inserts. The bounded retry loop below still
+   * exists for the residual case where a concurrent rename transaction
+   * (ProjectsService.update / MasterDataService.updateDiscipline) is
+   * rewriting codes into this discipline's namespace at the same time — the
+   * partial unique index remains the real arbiter.
+   *
+   * A collision on (projectId, externalId) is a different situation — it
+   * means this exact import row already exists — so it's surfaced as
    * DuplicateExternalIdError instead of retried.
    */
   async createClashRecord(input: {
@@ -423,34 +594,39 @@ export class ClashesService {
     const nowIso = new Date();
     const auditAction = input.auditAction ?? 'created';
 
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const count = await this.prisma.clash.count({ where: { disciplineId: input.discipline.id } });
-      const uniqueCode = `${input.project.code}-${input.discipline.code}-${String(count + 1).padStart(4, '0')}`;
-
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        return await this.prisma.$transaction(async (tx) => {
-          const clash = await tx.clash.create({
-            data: {
-              uniqueCode,
-              projectId: input.project.id,
-              title: input.title.trim(),
-              description: input.description.trim(),
-              disciplineId: input.discipline.id,
-              zoneId: input.zoneId,
-              statusId: input.statusId,
-              priorityId: input.priorityId,
-              reporterId: input.reporterId,
-              dueDate: input.dueDate,
-              externalId: input.externalId ?? null,
-            },
-          });
+        return await this.prisma.$transaction(
+          async (tx) => {
+            await lockDiscipline(tx, input.discipline.id);
+            const seq = await allocateLowestFreeSeq(tx, input.discipline.id);
+            const uniqueCode = formatClashCode(input.project.code, input.discipline.code, seq);
 
-          await tx.auditLog.create({
-            data: { clashId: clash.id, actorId: input.reporterId, action: auditAction, createdAt: nowIso },
-          });
+            const clash = await tx.clash.create({
+              data: {
+                uniqueCode,
+                seq,
+                projectId: input.project.id,
+                title: input.title.trim(),
+                description: input.description.trim(),
+                disciplineId: input.discipline.id,
+                zoneId: input.zoneId,
+                statusId: input.statusId,
+                priorityId: input.priorityId,
+                reporterId: input.reporterId,
+                dueDate: input.dueDate,
+                externalId: input.externalId ?? null,
+              },
+            });
 
-          return clash;
-        });
+            await tx.auditLog.create({
+              data: { clashId: clash.id, actorId: input.reporterId, action: auditAction, createdAt: nowIso },
+            });
+
+            return clash;
+          },
+          { maxWait: 10_000, timeout: 20_000 },
+        );
       } catch (error) {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
           const target = Array.isArray(error.meta?.target) ? (error.meta.target as string[]) : [];
@@ -459,7 +635,7 @@ export class ClashesService {
               `External id "${input.externalId}" sudah dipakai di proyek ini.`,
             );
           }
-          if (attempt === 0) continue; // uniqueCode race — retry with a recomputed count
+          if (attempt < 2) continue; // code/seq race — retry with a freshly allocated value
         }
         throw error;
       }
@@ -485,7 +661,9 @@ export class ClashesService {
     // Every id must belong to the active project: reject the whole batch
     // rather than silently skipping ids from another project, so a caller
     // can't use a partial 200 to probe which foreign ids exist.
-    const clashes = await this.prisma.clash.findMany({ where: { id: { in: dto.ids }, projectId } });
+    const clashes = await this.prisma.clash.findMany({
+      where: { id: { in: dto.ids }, projectId, ...NOT_DELETED },
+    });
     if (clashes.length !== dto.ids.length) {
       throw new NotFoundException('Satu atau lebih clash tidak ditemukan.');
     }
@@ -513,6 +691,91 @@ export class ClashesService {
 
     return this.prisma.comment.create({
       data: { clashId, authorId: user.id, content: dto.content.trim() },
+    });
+  }
+
+  // --- Delete / restore ---------------------------------------------------------
+
+  /**
+   * Admin-only soft delete: sets deletedAt so the clash drops out of every
+   * read path (list/metrics/bulkUpdate/detail/comments/attachments), while
+   * the row itself, its comments, audit log, and attachment files are left
+   * untouched. uniqueCode/seq ARE freed by this — a new clash in the same
+   * discipline can now be allocated this clash's old seq (see clash-code.ts)
+   * — so restore() below is no longer guaranteed to be lossless; it recovers
+   * the old code only if nothing has claimed it since. externalId is left
+   * untouched by this method, which is what actually keeps a re-import of
+   * the same externalId "skipped" (see the comment in ImportProcessor.importRow
+   * — do NOT make the (projectId, externalId) constraint partial too, or a
+   * re-import would resurrect deleted rows as duplicates).
+   */
+  async softDelete(id: string, user: AuthUser, projectId: string) {
+    await this.assertClashInProject(id, projectId);
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.clash.update({ where: { id }, data: { deletedAt: new Date() } });
+      await tx.auditLog.create({ data: { clashId: id, actorId: user.id, action: 'deleted' } });
+      return updated;
+    });
+  }
+
+  /**
+   * Reverses softDelete. Fast path: if nothing has since claimed this
+   * clash's old uniqueCode/seq, restore it unchanged. Otherwise — some other
+   * clash in the discipline was allocated that seq while this one was
+   * deleted — allocate a fresh seq at the END of the sequence (not a gap,
+   * to avoid churning some other live clash's would-be next code) and
+   * record the reassignment as its own AuditLog entry so the detail page's
+   * timeline explains the code change (see clashes/[id]/page.tsx auditText).
+   */
+  async restore(id: string, user: AuthUser, projectId: string) {
+    const clash = await this.assertClashInProject(id, projectId, { includeDeleted: true });
+    if (!clash.deletedAt) {
+      throw new BadRequestException('Clash ini tidak dalam status terhapus.');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      await lockDiscipline(tx, clash.disciplineId);
+
+      const conflict = await tx.clash.findFirst({
+        where: {
+          disciplineId: clash.disciplineId,
+          deletedAt: null,
+          OR: [{ uniqueCode: clash.uniqueCode }, { seq: clash.seq }],
+        },
+        select: { id: true },
+      });
+
+      if (!conflict) {
+        const updated = await tx.clash.update({ where: { id }, data: { deletedAt: null } });
+        await tx.auditLog.create({ data: { clashId: id, actorId: user.id, action: 'restored' } });
+        return updated;
+      }
+
+      const [project, discipline] = await Promise.all([
+        tx.project.findUniqueOrThrow({ where: { id: clash.projectId } }),
+        tx.discipline.findUniqueOrThrow({ where: { id: clash.disciplineId } }),
+      ]);
+      const newSeq = await allocateNextSeq(tx, clash.disciplineId);
+      const newCode = formatClashCode(project.code, discipline.code, newSeq);
+      const oldCode = clash.uniqueCode;
+
+      const updated = await tx.clash.update({
+        where: { id },
+        data: { deletedAt: null, seq: newSeq, uniqueCode: newCode },
+      });
+      await tx.auditLog.create({ data: { clashId: id, actorId: user.id, action: 'restored' } });
+      await tx.auditLog.create({
+        data: {
+          clashId: id,
+          actorId: user.id,
+          action: 'code_reassigned',
+          field: 'uniqueCode',
+          oldValue: oldCode,
+          newValue: newCode,
+        },
+      });
+      return updated;
     });
   }
 

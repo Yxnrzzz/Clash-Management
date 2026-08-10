@@ -19,6 +19,9 @@ const eslintConfig = defineConfig([
     // (.next, node_modules) that would otherwise get linted as if it were
     // this app's source, producing thousands of false-positive errors.
     ".claude/**",
+    // pdf.js's worker, copied into public/ by scripts/copy-pdf-worker.mjs
+    // (predev/prebuild) — a minified third-party bundle, not app source.
+    "public/pdf.worker.min.mjs",
   ]),
 ]);
 

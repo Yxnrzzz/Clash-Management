@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { canComment, canEditClash, formatBytes, formatDate, formatDateTime, isAdmin, isAssignable } from "./lookup";
-import type { Clash, User } from "./types";
+import {
+  allowedStatusTransitions,
+  canDeleteAttachment,
+  canDeleteClash,
+  canDrawAnnotation,
+  canEditAnnotation,
+  canEditClash,
+  canUploadAttachment,
+  formatBytes,
+  formatDate,
+  formatDateTime,
+  isAdmin,
+  isAssignable,
+} from "./lookup";
+import type { Clash, Status, User } from "./types";
 
 function makeUser(overrides: Partial<User> = {}): User {
   return {
@@ -9,6 +22,7 @@ function makeUser(overrides: Partial<User> = {}): User {
     email: "test@example.com",
     peran: "Engineer",
     isActive: true,
+    mustChangePassword: false,
     ...overrides,
   };
 }
@@ -29,9 +43,26 @@ function makeClash(overrides: Partial<Clash> = {}): Clash {
     dueDate: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     closedAt: null,
+    deletedAt: null,
     ...overrides,
   };
 }
+
+function makeStatus(overrides: Partial<Status> = {}): Status {
+  return {
+    id: "s1",
+    nama: "Open",
+    urutan: 1,
+    isClosedState: false,
+    ...overrides,
+  };
+}
+
+const STATUSES: Status[] = [
+  makeStatus({ id: "s-open", nama: "Open", urutan: 1, isClosedState: false }),
+  makeStatus({ id: "s-inprogress", nama: "In Progress", urutan: 2, isClosedState: false }),
+  makeStatus({ id: "s-closed", nama: "Closed", urutan: 3, isClosedState: true }),
+];
 
 describe("formatDate", () => {
   it('returns "-" for null', () => {
@@ -93,20 +124,82 @@ describe("canEditClash", () => {
   });
 });
 
-describe("canComment", () => {
-  it("denies Management", () => {
-    expect(canComment("Management")).toBe(false);
-  });
-
-  it.each(["Engineer", "Coordinator", "Admin"] as const)("allows %s", (role) => {
-    expect(canComment(role)).toBe(true);
-  });
-});
 
 describe("isAdmin", () => {
   it("returns true only for Admin", () => {
     expect(isAdmin("Admin")).toBe(true);
     expect(isAdmin("Coordinator")).toBe(false);
+  });
+});
+
+describe("canDeleteClash", () => {
+  it("allows only Admin", () => {
+    expect(canDeleteClash("Admin")).toBe(true);
+    expect(canDeleteClash("Coordinator")).toBe(false);
+    expect(canDeleteClash("Engineer")).toBe(false);
+    expect(canDeleteClash("Management")).toBe(false);
+  });
+});
+
+describe("canUploadAttachment", () => {
+  it("allows Engineer, Coordinator, and Admin", () => {
+    expect(canUploadAttachment("Engineer")).toBe(true);
+    expect(canUploadAttachment("Coordinator")).toBe(true);
+    expect(canUploadAttachment("Admin")).toBe(true);
+  });
+
+  it("denies Management", () => {
+    expect(canUploadAttachment("Management")).toBe(false);
+  });
+});
+
+describe("canDeleteAttachment", () => {
+  it("allows an Engineer to delete their own upload", () => {
+    expect(canDeleteAttachment("Engineer", "user-1", "user-1")).toBe(true);
+  });
+
+  it("denies an Engineer deleting someone else's upload", () => {
+    expect(canDeleteAttachment("Engineer", "user-2", "user-1")).toBe(false);
+  });
+
+  it("allows Coordinator and Admin to delete any upload", () => {
+    expect(canDeleteAttachment("Coordinator", "user-2", "user-1")).toBe(true);
+    expect(canDeleteAttachment("Admin", "user-2", "user-1")).toBe(true);
+  });
+
+  it("denies Management regardless of ownership", () => {
+    expect(canDeleteAttachment("Management", "user-1", "user-1")).toBe(false);
+  });
+});
+
+describe("canDrawAnnotation", () => {
+  it("allows Engineer, Coordinator, and Admin", () => {
+    expect(canDrawAnnotation("Engineer")).toBe(true);
+    expect(canDrawAnnotation("Coordinator")).toBe(true);
+    expect(canDrawAnnotation("Admin")).toBe(true);
+  });
+
+  it("denies Management", () => {
+    expect(canDrawAnnotation("Management")).toBe(false);
+  });
+});
+
+describe("canEditAnnotation", () => {
+  it("allows the author (Engineer) to edit their own markup", () => {
+    expect(canEditAnnotation("Engineer", "user-1", "user-1")).toBe(true);
+  });
+
+  it("denies an Engineer editing someone else's markup", () => {
+    expect(canEditAnnotation("Engineer", "user-2", "user-1")).toBe(false);
+  });
+
+  it("allows Coordinator and Admin to edit any markup", () => {
+    expect(canEditAnnotation("Coordinator", "user-2", "user-1")).toBe(true);
+    expect(canEditAnnotation("Admin", "user-2", "user-1")).toBe(true);
+  });
+
+  it("denies Management regardless of authorship", () => {
+    expect(canEditAnnotation("Management", "user-1", "user-1")).toBe(false);
   });
 });
 
@@ -121,5 +214,55 @@ describe("isAssignable", () => {
 
   it.each(["Coordinator", "Management", "Admin"] as const)("denies %s", (peran) => {
     expect(isAssignable(makeUser({ peran, isActive: true }))).toBe(false);
+  });
+});
+
+describe("allowedStatusTransitions", () => {
+  it.each(["Coordinator", "Admin"] as const)(
+    "%s may move to any other status",
+    (peran) => {
+      const clash = makeClash({ statusId: "s-open" });
+      expect(allowedStatusTransitions(STATUSES, peran, clash, "someone-else")).toEqual([
+        "s-inprogress",
+        "s-closed",
+      ]);
+    },
+  );
+
+  it("assigned Engineer may only move one step forward into a non-closed status", () => {
+    const clash = makeClash({ statusId: "s-open", assigneeId: "user-1" });
+    expect(allowedStatusTransitions(STATUSES, "Engineer", clash, "user-1")).toEqual([
+      "s-inprogress",
+    ]);
+  });
+
+  it("assigned Engineer cannot close an item, even one step forward", () => {
+    const clash = makeClash({ statusId: "s-inprogress", assigneeId: "user-1" });
+    expect(allowedStatusTransitions(STATUSES, "Engineer", clash, "user-1")).toEqual([]);
+  });
+
+  it("unassigned Engineer gets no transitions", () => {
+    const clash = makeClash({ statusId: "s-open", assigneeId: "someone-else" });
+    expect(allowedStatusTransitions(STATUSES, "Engineer", clash, "user-1")).toEqual([]);
+  });
+
+  it("Management gets no transitions", () => {
+    const clash = makeClash({ statusId: "s-open", assigneeId: "user-1" });
+    expect(allowedStatusTransitions(STATUSES, "Management", clash, "user-1")).toEqual([]);
+  });
+
+  it("returns an empty list when the clash's statusId isn't in master data", () => {
+    const clash = makeClash({ statusId: "s-unknown" });
+    expect(allowedStatusTransitions(STATUSES, "Admin", clash, "user-1")).toEqual([]);
+  });
+
+  it("checks isClosedState, not the status name — renaming 'Closed' can't open a loophole", () => {
+    const statuses = [
+      makeStatus({ id: "s-open", nama: "Open", urutan: 1, isClosedState: false }),
+      // Renamed away from "Closed" but still flagged as a closed state.
+      makeStatus({ id: "s-done", nama: "Selesai", urutan: 2, isClosedState: true }),
+    ];
+    const clash = makeClash({ statusId: "s-open", assigneeId: "user-1" });
+    expect(allowedStatusTransitions(statuses, "Engineer", clash, "user-1")).toEqual([]);
   });
 });

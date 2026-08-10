@@ -1,4 +1,4 @@
-import type { Clash, Role, User } from "./types";
+import type { Clash, Role, Status, User } from "./types";
 
 export function formatDate(iso: string | null) {
   if (!iso) return "-";
@@ -31,14 +31,70 @@ export function canEditClash(role: Role, clash: Clash, userId: string) {
   return false;
 }
 
-export function canComment(role: Role) {
-  return role !== "Management";
-}
-
 export function isAdmin(role: Role) {
   return role === "Admin";
 }
 
+export function canDeleteClash(role: Role) {
+  return role === "Admin";
+}
+
+/** Any role that can write may attach files to any clash in their project —
+ * unlike editing the clash's own fields, this isn't restricted to the
+ * assignee/reporter. Management stays read-only. */
+export function canUploadAttachment(role: Role) {
+  return role === "Engineer" || role === "Coordinator" || role === "Admin";
+}
+
+/** Engineer may delete only their own upload; Coordinator/Admin may delete
+ * anyone's. Keyed on the uploader, not assignee/reporter — a distinct rule
+ * from canEditClash(). */
+export function canDeleteAttachment(role: Role, uploadedById: string, userId: string) {
+  if (role === "Coordinator" || role === "Admin") return true;
+  if (role === "Engineer") return uploadedById === userId;
+  return false;
+}
+
+/** Markup is shared but only writable by roles that can already write
+ * elsewhere — Management stays read-only, same as attachments/comments. */
+export function canDrawAnnotation(role: Role) {
+  return role === "Engineer" || role === "Coordinator" || role === "Admin";
+}
+
+/** Author may edit/delete their own markup; Coordinator/Admin may edit/
+ * delete anyone's — mirrors canDeleteAttachment's shape. */
+export function canEditAnnotation(role: Role, authorId: string, userId: string) {
+  if (role === "Coordinator" || role === "Admin") return true;
+  if (role === "Engineer") return authorId === userId;
+  return false;
+}
+
 export function isAssignable(user: User) {
   return user.isActive && user.peran === "Engineer";
+}
+
+/**
+ * Coordinator/Admin may move to any other status. An Engineer may only
+ * move their own assigned item forward one step, and never into a
+ * closed-state status — this checks `isClosedState`, not the status
+ * name, so renaming "Closed" from the Admin master-data page can't
+ * silently let an Engineer close an item.
+ */
+export function allowedStatusTransitions(
+  statuses: Status[],
+  role: Role,
+  clash: Clash,
+  userId: string,
+): string[] {
+  const current = statuses.find((s) => s.id === clash.statusId);
+  if (!current) return [];
+  if (role === "Coordinator" || role === "Admin") {
+    return statuses.map((s) => s.id).filter((id) => id !== current.id);
+  }
+  if (role === "Engineer" && clash.assigneeId === userId) {
+    return statuses
+      .filter((s) => s.urutan === current.urutan + 1 && !s.isClosedState)
+      .map((s) => s.id);
+  }
+  return [];
 }

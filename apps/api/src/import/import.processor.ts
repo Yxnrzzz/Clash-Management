@@ -60,9 +60,12 @@ export class ImportProcessor extends WorkerHost {
       const { columns, rows } = importJob.format === 'xml' ? parseXml(text) : parseCsv(text);
       const colIndex = (col: string) => columns.indexOf(col);
 
+      // Status has no projectId — it's global across every project (see
+      // master-data.service.ts), so this can only ever be empty for a
+      // completely unseeded database, never "this project specifically".
       const openStatus = await this.prisma.status.findFirst({ orderBy: { sequence: 'asc' } });
       if (!openStatus) {
-        throw new Error('Belum ada status yang dikonfigurasi untuk proyek ini.');
+        throw new Error('Belum ada status yang dikonfigurasi.');
       }
 
       // Loaded once and mutated in place as autoCreate adds new rows, so
@@ -179,6 +182,16 @@ export class ImportProcessor extends WorkerHost {
     // (projectId, externalId) is the authoritative guard against a race
     // between two rows/jobs, this check just avoids the DB round trip and
     // gives a clean "skipped" outcome in the common (non-racing) case.
+    // Deliberately NOT filtered by deletedAt: @@unique([projectId,
+    // externalId]) isn't soft-delete-aware either, so a soft-deleted
+    // imported clash keeps occupying its externalId slot forever. Filtering
+    // this check would just make the create attempt hit that constraint
+    // instead and land in the same "skipped" outcome via
+    // DuplicateExternalIdError below — leaving it unfiltered keeps the
+    // clean path and means a re-import never resurrects a deleted row. This
+    // is now the ONLY thing providing that guarantee — unlike externalId,
+    // uniqueCode/seq themselves ARE freed on delete (see clash-code.ts), so
+    // do not make this constraint deletedAt-partial too.
     const externalId = resolved.externalIdRaw || null;
     if (externalId) {
       const existing = await this.prisma.clash.findFirst({

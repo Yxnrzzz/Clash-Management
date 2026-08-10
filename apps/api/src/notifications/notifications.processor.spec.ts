@@ -108,4 +108,17 @@ describe('NotificationsProcessor', () => {
     expect(email.sendClashNotification).not.toHaveBeenCalled();
     expect(whatsapp.send).not.toHaveBeenCalled();
   });
+
+  it('does nothing when the clash was soft-deleted after this job was enqueued', async () => {
+    const { processor, prisma, email, whatsapp } = makeHarness(null);
+    (prisma.clash.findUnique as jest.Mock).mockResolvedValue({
+      ...CLASH,
+      deletedAt: new Date('2026-08-01'),
+    });
+
+    await processor.process(makeJob());
+
+    expect(email.sendClashNotification).not.toHaveBeenCalled();
+    expect(whatsapp.send).not.toHaveBeenCalled();
+  });
 });

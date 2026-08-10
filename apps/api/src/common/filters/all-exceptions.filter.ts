@@ -7,8 +7,9 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { MulterError } from 'multer';
 import * as Sentry from '@sentry/node';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 
 /**
  * Last line of defense: anything that reaches here means a route/service
@@ -26,17 +27,27 @@ export class AllExceptionsFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
+    const request = ctx.getRequest<Request & { id?: string }>();
 
     const { status, body } = this.resolve(exception);
 
     if (status >= 500) {
+      // request.id is the same value pino-http/genReqId (app.module.ts)
+      // already put on the X-Request-Id response header — logging it here
+      // too is what makes "user reports error ID X" actually traceable to a
+      // log line, instead of only having the message + stack with no way
+      // to find which request produced them.
       this.logger.error(
-        `Unhandled exception: ${this.describe(exception)}`,
+        `Unhandled exception [requestId=${request.id ?? 'unknown'}]: ${this.describe(exception)}`,
         exception instanceof Error ? exception.stack : undefined,
       );
       // No-op when SENTRY_DSN isn't set (Sentry.init() was never called in
       // main.ts) — safe to call unconditionally.
-      Sentry.captureException(exception);
+      Sentry.captureException(exception, { tags: { requestId: request.id } });
+      // Included only for 5xx, not every 4xx — this is the "something broke
+      // on our end, here's what to quote when you report it" id, not
+      // something a plain validation error needs.
+      body.requestId = request.id;
     }
 
     response.status(status).json(body);
@@ -54,9 +65,44 @@ export class AllExceptionsFilter implements ExceptionFilter {
       return this.resolvePrismaError(exception);
     }
 
+    // Multer's own limits (MAX_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS, …in
+    // clashes.controller.ts / import.controller.ts) throw MulterError, not
+    // an HttpException — without this it fell through to a generic 500,
+    // which is wrong (it's a client error, "file too big") and gets logged
+    // to Sentry as if it were a real fault.
+    if (exception instanceof MulterError) {
+      return this.resolveMulterError(exception);
+    }
+
+    // main.ts's body-parser limit (see useBodyParser) rejects an oversized
+    // JSON/urlencoded body by throwing a plain http-errors object — same
+    // "silently becomes a 500" gap as MulterError above, just from a
+    // different library. http-errors doesn't export a class to instanceof
+    // against here, so this checks the `type` marker it sets instead (see
+    // node_modules/raw-body's use of createError(413, …, { type: 'entity.too.large' })).
+    if (exception instanceof Error && (exception as { type?: string }).type === 'entity.too.large') {
+      return {
+        status: HttpStatus.PAYLOAD_TOO_LARGE,
+        body: { statusCode: 413, message: 'Ukuran permintaan terlalu besar.' },
+      };
+    }
+
     return {
       status: HttpStatus.INTERNAL_SERVER_ERROR,
       body: { statusCode: 500, message: 'Terjadi kesalahan pada server.' },
+    };
+  }
+
+  private resolveMulterError(error: MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return {
+        status: HttpStatus.PAYLOAD_TOO_LARGE,
+        body: { statusCode: 413, message: 'Ukuran file melebihi batas maksimum.' },
+      };
+    }
+    return {
+      status: HttpStatus.BAD_REQUEST,
+      body: { statusCode: 400, message: 'Berkas yang diunggah tidak valid.' },
     };
   }
 

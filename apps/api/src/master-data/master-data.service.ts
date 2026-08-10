@@ -1,5 +1,14 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { AuthUser } from '../auth/auth.types';
+import { CODE_RENAME_AUDIT_CHUNK_SIZE, formatClashCode } from '../clashes/clash-code';
 import {
   CopyTemplateDto,
   CreateDisciplineDto,
@@ -40,24 +49,117 @@ export class MasterDataService {
     });
   }
 
-  async updateDiscipline(id: string, dto: UpdateDisciplineDto, projectId: string) {
-    const existing = await this.assertExists('discipline', id, 'Disiplin tidak ditemukan.', projectId);
+  /**
+   * A name-only update is a plain field write. A code change is treated as
+   * a rename: same shape as ProjectsService.update — it rewrites every
+   * clash's uniqueCode in this discipline (including soft-deleted ones) so
+   * uniqueCode stays `${project.code}-${code}-${seq}` for every row.
+   */
+  async updateDiscipline(id: string, dto: UpdateDisciplineDto, projectId: string, actor: AuthUser) {
+    const existing = await this.prisma.discipline.findUnique({ where: { id } });
+    if (!existing || existing.projectId !== projectId) {
+      throw new NotFoundException('Disiplin tidak ditemukan.');
+    }
 
-    if (dto.code !== undefined) {
-      const code = dto.code.trim().toUpperCase();
+    const nextName = dto.name !== undefined ? dto.name.trim() : undefined;
+    const nextCode = dto.code !== undefined ? dto.code.trim().toUpperCase() : undefined;
+    const codeChanged = nextCode !== undefined && nextCode !== existing.code;
+
+    if (codeChanged) {
       const clash = await this.prisma.discipline.findUnique({
-        where: { projectId_code: { projectId: existing.projectId, code } },
+        where: { projectId_code: { projectId: existing.projectId, code: nextCode } },
       });
       if (clash && clash.id !== id) throw new ConflictException('Kode disiplin sudah dipakai');
     }
 
+    if (!codeChanged) {
+      return this.prisma.discipline.update({
+        where: { id },
+        data: { ...(nextName !== undefined ? { name: nextName } : {}) },
+      });
+    }
+
+    await this.rewriteDisciplineClashCodes(id, existing.projectId, nextCode, actor.id);
+
     return this.prisma.discipline.update({
       where: { id },
-      data: {
-        ...(dto.code !== undefined ? { code: dto.code.trim().toUpperCase() } : {}),
-        ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
-      },
+      data: { code: nextCode, ...(nextName !== undefined ? { name: nextName } : {}) },
     });
+  }
+
+  /**
+   * Same set-based-UPDATE-is-safe reasoning as
+   * ProjectsService.rewriteProjectClashCodes: every affected row moves from
+   * the old discipline-code segment to the new one, OLD != new is already
+   * guaranteed by the caller, so the batch's before/after code sets are
+   * disjoint and a single statement can't collide with itself. The only
+   * real risk is a live clash in a DIFFERENT discipline already occupying
+   * one of the new codes — checked up front and again via the partial
+   * unique index as a backstop.
+   */
+  private async rewriteDisciplineClashCodes(
+    disciplineId: string,
+    projectId: string,
+    newDisciplineCode: string,
+    actorId: string,
+  ): Promise<number> {
+    return this.prisma.$transaction(
+      async (tx) => {
+        const project = await tx.project.findUniqueOrThrow({ where: { id: projectId } });
+
+        const affected = await tx.clash.findMany({
+          where: { disciplineId },
+          select: { id: true, uniqueCode: true, seq: true },
+        });
+        if (affected.length === 0) return 0;
+
+        const newCodeById = new Map(
+          affected.map((c) => [c.id, formatClashCode(project.code, newDisciplineCode, c.seq)]),
+        );
+        const newCodes = [...newCodeById.values()];
+
+        const collisions = await tx.clash.findMany({
+          where: { disciplineId: { not: disciplineId }, deletedAt: null, uniqueCode: { in: newCodes } },
+          select: { uniqueCode: true },
+          take: 20,
+        });
+        if (collisions.length > 0) {
+          throw new ConflictException(
+            `Tidak bisa mengubah kode disiplin: ${collisions.length} kode clash baru akan bentrok (mis. "${collisions[0].uniqueCode}").`,
+          );
+        }
+
+        try {
+          await tx.$executeRaw`
+            UPDATE "Clash"
+               SET "uniqueCode" = ${project.code} || '-' || ${newDisciplineCode} || '-' || lpad("seq"::text, 4, '0')
+             WHERE "disciplineId" = ${disciplineId}`;
+        } catch (error) {
+          if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+            throw new ConflictException('Tidak bisa mengubah kode disiplin: bentrok dengan clash lain.');
+          }
+          throw error;
+        }
+
+        const nowIso = new Date();
+        for (let i = 0; i < affected.length; i += CODE_RENAME_AUDIT_CHUNK_SIZE) {
+          await tx.auditLog.createMany({
+            data: affected.slice(i, i + CODE_RENAME_AUDIT_CHUNK_SIZE).map((c) => ({
+              clashId: c.id,
+              actorId,
+              action: 'code_changed',
+              field: 'uniqueCode',
+              oldValue: c.uniqueCode,
+              newValue: newCodeById.get(c.id)!,
+              createdAt: nowIso,
+            })),
+          });
+        }
+
+        return affected.length;
+      },
+      { timeout: 60_000, maxWait: 10_000 },
+    );
   }
 
   async setDisciplineActive(id: string, isActive: boolean, projectId: string) {
@@ -172,6 +274,14 @@ export class MasterDataService {
     ]);
     if (!fromProject) throw new NotFoundException('Proyek sumber tidak ditemukan.');
     if (!toProject) throw new NotFoundException('Proyek tujuan tidak ditemukan.');
+    // fromProjectId/toProjectId come from the body, not X-Project-Id, so
+    // ProjectContextGuard's archived check never sees them — this route is
+    // @SkipProjectScope() by design (cross-project). Check the target
+    // explicitly; copying INTO an archived project would be silently
+    // invisible until it's unarchived.
+    if (toProject.archivedAt) {
+      throw new ForbiddenException('Proyek tujuan sudah diarsipkan.');
+    }
 
     const copied = { disciplines: 0, zones: 0 };
     const skipped = { disciplines: 0, zones: 0 };

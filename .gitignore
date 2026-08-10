@@ -33,6 +33,7 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 !.env.example
+!.env.prod.example
 !apps/api/.env.example
 
 # uploaded attachments (local disk storage)
@@ -40,10 +41,21 @@ yarn-error.log*
 
 # local pg_dump output from scripts/backup-db.sh
 /apps/api/backups/
+# same, for docker-compose.prod.yml's `backup` service
+/backups/
 
 # vercel
 .vercel
 
+# Claude Code's local permission allowlist — built up per-developer-machine
+# from individual approval prompts, not something to share/merge across
+# checkouts. .claude/launch.json (dev server config) stays tracked.
+.claude/settings.local.json
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# pdf.js worker — copied from node_modules by scripts/copy-pdf-worker.mjs
+# (predev/prebuild), regenerated on every install rather than committed.
+/public/pdf.worker.min.mjs

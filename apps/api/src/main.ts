@@ -1,4 +1,6 @@
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { ConfigService } from '@nestjs/config';
 import { ValidationPipe } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
@@ -13,12 +15,48 @@ import { AppModule } from './app.module';
 // called (documented Sentry SDK behavior), so nothing there needs to branch
 // on whether a DSN is configured.
 if (process.env.SENTRY_DSN) {
-  Sentry.init({ dsn: process.env.SENTRY_DSN, tracesSampleRate: 0.1 });
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    tracesSampleRate: 0.1,
+    // Without `environment`, a staging deploy's errors are indistinguishable
+    // from production's in the same Sentry project. `release` is optional —
+    // set it in CI/deploy (e.g. to the git SHA) to get per-deploy grouping;
+    // omitted entirely rather than defaulting to package.json's version,
+    // which nothing bumps on every release and would misleadingly imply
+    // every deploy shares one "release".
+    environment: process.env.NODE_ENV ?? 'development',
+    release: process.env.RELEASE,
+  });
 }
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  // bodyParser: false so the json/urlencoded limit below is explicit and
+  // deliberately chosen rather than whatever body-parser's own default
+  // happens to be (100kb, same value — this changes nothing about current
+  // behavior, just makes the ceiling something this file states on purpose
+  // rather than one nobody chose). Doesn't affect file uploads: multer
+  // parses multipart/form-data itself, per-route via FilesInterceptor/
+  // FileInterceptor, entirely separate from this global JSON/urlencoded
+  // parser.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bufferLogs: true,
+    bodyParser: false,
+  });
+  app.useBodyParser('json', { limit: '100kb' });
+  app.useBodyParser('urlencoded', { limit: '100kb', extended: true });
   app.useLogger(app.get(Logger));
+
+  // Every per-IP mechanism downstream (UserThrottlerGuard's fallback for
+  // @Public() routes, most importantly the login brute-force limiter) reads
+  // `req.ip`, which Express only derives from X-Forwarded-For when told to
+  // trust it — otherwise every request behind a reverse proxy shows the
+  // proxy's own IP, collapsing every client into one shared rate-limit
+  // bucket. The hop count must match the real proxy chain (see
+  // TRUSTED_PROXY_HOPS's comment in env.validation.ts): too low and clients
+  // behind the real proxy share a bucket; too high and a client can spoof
+  // X-Forwarded-For to dodge the limit entirely.
+  const config = app.get(ConfigService);
+  app.set('trust proxy', config.get<number>('TRUSTED_PROXY_HOPS'));
 
   app.setGlobalPrefix('api');
   app.use(helmet());

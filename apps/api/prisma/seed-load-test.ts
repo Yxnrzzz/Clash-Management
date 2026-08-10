@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Prisma, PrismaClient } from '@prisma/client';
+import { formatClashCode } from '../src/clashes/clash-code';
 
 /**
  * Sprint 11 load-test data generator — NOT part of the demo seed
@@ -102,6 +103,20 @@ async function main() {
   const rng = mulberry32(1337);
   const now = new Date();
 
+  // seq is unique per (disciplineId, live row) — a global LOADTEST-NNNNNN
+  // counter would collide with that partial index. Start each discipline's
+  // counter from whatever real (non-loadtest) clashes already occupy, so
+  // this never fights the demo seed data for the same discipline.
+  const maxSeqByDiscipline = await prisma.clash.groupBy({
+    by: ['disciplineId'],
+    where: { projectId: project.id, deletedAt: null },
+    _max: { seq: true },
+  });
+  const disciplineCounters: Record<string, number> = {};
+  for (const row of maxSeqByDiscipline) {
+    disciplineCounters[row.disciplineId] = row._max.seq ?? 0;
+  }
+
   console.log(`Membuat ${count} clash uji beban di proyek ${project.code}...`);
 
   for (let start = 0; start < count; start += BATCH_SIZE) {
@@ -120,9 +135,13 @@ async function main() {
       const dueDate = rng() < 0.85 ? addDays(createdAt, 5 + Math.floor(rng() * 25)) : null;
       const closedAt = status.isClosedState ? addDays(createdAt, 3 + Math.floor(rng() * 20)) : null;
 
+      disciplineCounters[discipline.id] = (disciplineCounters[discipline.id] ?? 0) + 1;
+      const seq = disciplineCounters[discipline.id];
+
       rows.push({
         id: randomUUID(),
-        uniqueCode: `LOADTEST-${String(n).padStart(6, '0')}`,
+        uniqueCode: formatClashCode(project.code, discipline.code, seq),
+        seq,
         externalId: `${EXTERNAL_ID_PREFIX}${n}`,
         projectId: project.id,
         title: pick(rng, CLASH_TITLES),
